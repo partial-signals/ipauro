@@ -1,0 +1,31 @@
+# baseline captured before plugging in a USB Mac
+## interface list
+lo0 gif0 stf0 anpi0 anpi2 anpi1 en3 en4 en5 en1 en6 en2 bridge0 utun0 ap1 en0 awdl0 utun1 llw0 utun2 utun3 utun4 bridge1
+
+## all en interfaces (addr/status)
+en3: 	ether ee:37:4f:9d:13:1f 	status: inactive 
+en4: 	ether ee:37:4f:9d:13:20 	status: inactive 
+en5: 	ether ee:37:4f:9d:13:21 	status: inactive 
+en1: 	ether 36:58:10:5a:87:c0 	status: inactive 
+en6: 	ether 36:58:10:5a:87:c4 	status: inactive 
+en2: 	ether 36:58:10:5a:87:c8 	status: inactive 
+en0: 	ether fc:b2:14:c3:3b:13 	inet 192.168.10.31 netmask 0xffffff00 broadcast 192.168.10.255 	status: active 
+
+## existing bridges + members
+--- bridge0 ---
+	member: en1 flags=3<LEARNING,DISCOVER>
+	member: en6 flags=3<LEARNING,DISCOVER>
+	member: en2 flags=3<LEARNING,DISCOVER>
+	status: inactive
+--- bridge1 ---
+	inet 10.0.0.1 netmask 0xffffff00 broadcast 10.0.0.255
+	status: inactive
+
+## USB-NCM present right now (expect none)
+(none)
+
+## USB Mac devices in IOUSB (expect none)
+(none)
+
+## leftover bridge90 from our PoC? (expect not present)
+(absent)

@@ -1,0 +1,153 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MirrorConfig",
+  "description": "A service mirror — the projection of a [`ServiceConfig`] onto concrete infra. Lives at `.yah/services/<svc>/mirrors/<env>.toml`.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "shape"
+  ],
+  "properties": {
+    "asset_aliases": {
+      "description": "Per-environment alias overrides for `kind = \"static-asset\"` components.\n\nKeys are logical names (e.g. `\"whisper-default\"`); values must be filenames present in the component's `workload.toml` catalog. **Resolution only** — this table may never introduce a filename absent from the catalog. Validated against the workload catalog at sync time.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "providers": {
+      "description": "Provider slots, keyed by role (`\"static\"`, `\"compute\"`, …). Each value either references a provider declared under `.yah/infra/providers/` or inlines a local-only provider (no creds, no infra file).",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/MirrorProviderSlot"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "shape": {
+      "$ref": "#/definitions/MirrorShape"
+    }
+  },
+  "definitions": {
+    "MirrorProviderSlot": {
+      "description": "A provider slot inside a [`MirrorConfig`]. Two shapes: - **Reference** (`use = \"<provider-id>\"`) — point at an infra-declared provider; extra fields are slot-specific (bucket, zone, dns, …). - **Inline** (`kind = \"local-*\"`) — for providers that need no infra declaration because they carry no credentials.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "use"
+          ],
+          "properties": {
+            "use": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "$ref": "#/definitions/Provider"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "MirrorShape": {
+      "description": "Topological shape of a mirror — how its providers sit relative to each other.",
+      "oneOf": [
+        {
+          "description": "Single machine hosts compute (and any non-Cloudflare-fronted static).",
+          "type": "string",
+          "enum": [
+            "single-machine"
+          ]
+        },
+        {
+          "description": "Operator-local dev mirror — static via built-in file server, compute via the local container runtime.",
+          "type": "string",
+          "enum": [
+            "local"
+          ]
+        },
+        {
+          "description": "Multi-machine deployment (machines listed per provider slot).",
+          "type": "string",
+          "enum": [
+            "multi-machine"
+          ]
+        }
+      ]
+    },
+    "Provider": {
+      "description": "Tag for the infrastructure provider kind. Drives which fields are valid in a [`ProviderConfig`] body or a [`MirrorProviderSlot::Inline`] block.\n\nTwo flavors: - **Account/runtime providers** (`cloudflare`, `hetzner`, `local-container`) live as files under `.yah/infra/providers/<id>.toml` and are referenced from a mirror via `use = \"<id>\"`. - **Inline-only providers** (`local-static`, `miniflare-container`, `minio-container`) declare an operator-local stand-in directly inside a mirror via `kind = \"...\"`. They carry no credentials and have no provider file. The container-backed kinds ride on top of whichever `local-container` runtime is declared in infra (orbstack/colima/docker); the reconciler resolves the runtime at up-time.",
+      "oneOf": [
+        {
+          "description": "Cloudflare account: R2 buckets, DNS, Workers, Tunnels.",
+          "type": "string",
+          "enum": [
+            "cloudflare"
+          ]
+        },
+        {
+          "description": "Hetzner Cloud + Object Storage account.",
+          "type": "string",
+          "enum": [
+            "hetzner"
+          ]
+        },
+        {
+          "description": "Vultr cloud VPS — auto-provisioned via the `cloud.vps.*` Envoy (`VultrEnvoy`), the burst/scaling counterpart to Hetzner. Driver-backed.",
+          "type": "string",
+          "enum": [
+            "vultr"
+          ]
+        },
+        {
+          "description": "BYO bare/static node (OVH, on-prem, anything we did NOT provision via a cloud API). Brought up over SSH (`stand-up-warden.sh` / `yah cloud machine bootstrap`); reach is declared in the machine's `[connect]` block. No create/destroy driver — placement-only.",
+          "type": "string",
+          "enum": [
+            "static"
+          ]
+        },
+        {
+          "description": "Built-in static-file server bound to localhost. Inline-only; never declared as a standalone provider file because it carries no creds.",
+          "type": "string",
+          "enum": [
+            "local-static"
+          ]
+        },
+        {
+          "description": "Local container runtime (orbstack/colima/docker). Configured by a provider file under `.yah/infra/providers/` so the discovery hints + runtime override sit in one place.",
+          "type": "string",
+          "enum": [
+            "local-container"
+          ]
+        },
+        {
+          "description": "Containerized miniflare (workerd subprocess) fronting MinIO — the pond-tier stand-in for a CF Worker + R2 static surface. Inline-only; the reconciler spawns miniflare via the JS runtime and starts a MinIO container on the local-container runtime.",
+          "type": "string",
+          "enum": [
+            "miniflare-container"
+          ]
+        },
+        {
+          "description": "Containerized MinIO providing an S3-compatible API — the pond-tier stand-in for Cloudflare R2. Inline-only; the reconciler spins up the container on the local-container runtime and auto-creates the declared bucket on first up.",
+          "type": "string",
+          "enum": [
+            "minio-container"
+          ]
+        }
+      ]
+    }
+  }
+}

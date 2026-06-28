@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yah.dev/schemas/camp.toml.schema.json",
+  "title": "Camp configuration",
+  "description": "Per-camp config for yah workspaces (.yah/camp.toml). Replaces the pre-R179 trio of camp.json, agent-settings.json, and approval.toml.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable workspace name."
+    },
+    "viewports": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" },
+      "description": "Subdirectories explicitly declared as viewports of this camp."
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tab": {
+          "type": "string",
+          "enum": ["party", "arch", "board", "settings"],
+          "description": "Default UI tab on camp open."
+        },
+        "arch_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Default depth for arch graph slices."
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1,
+          "description": "Schema version for the [agent] block."
+        },
+        "writers_enabled": {
+          "type": "boolean",
+          "description": "When true, the runner exposes write tools behind the approval gate. Default: false."
+        },
+        "mcp_debug": {
+          "type": "boolean",
+          "description": "When true, yah MCP server tees every stdio frame to .yah/mcp-debug.jsonl. Default: false."
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket_preview_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Max bytes the Data-tab bucket viewer fetches when previewing an object. Files at or below this size auto-preview in full on click; larger files show a 'click to preview' affordance and truncate at this limit. Default: 1048576 (1 MiB)."
+        }
+      }
+    },
+    "concierge_subclass": {
+      "type": "string",
+      "description": "Subclass ID to use as the camp's concierge singleton. Falls back to the Thief→Cleric heuristic when absent."
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "board": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "writes": {
+              "type": "string",
+              "enum": ["prompt", "auto"],
+              "description": "Policy for board.* write verbs. \"prompt\" routes through the approval gate; \"auto\" auto-passes without prompting."
+            }
+          }
+        }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Scanner scope overrides: paths to prune from this camp's scan and extra roots to include.",
+      "properties": {
+        "exclude_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Camp-relative path prefixes to exclude from the scanner. Any file or directory whose path starts with one of these entries is skipped. Useful for external projects under the camp root that have no own .yah/ and whose annotations should not surface on this board."
+        },
+        "peer_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Extra roots (camp-relative or ../-relative) to walk in addition to the main camp root. Annotations found there are merged into this camp's ticket graph. Useful when a sibling project has no own .yah/ but its tickets should belong to this camp."
+        },
+        "override_gitignore": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Camp-relative paths to include even when listed in .gitignore. Useful for directories gitignored for git-history reasons (e.g. colocated repos with independent .git/ trees) that should still be scanned by this camp. Subcamps inside (directories with their own .yah/) are still pruned by the subcamp-boundary rule."
+        }
+      }
+    },
+    "mount": {
+      "type": "array",
+      "description": "Subcamps to mount for cross-camp ticket operations. Each entry is a subdirectory with its own .yah/ that this camp can read and operate on in place. Ticket IDs from a mount are prefixed with the mount's code at display time; IDs are never rewritten in the subcamp's source.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Camp-relative path to the subcamp directory. Must contain a .yah/ subdirectory."
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z]{2,4}$",
+            "description": "Ephemeral display prefix for this mount's ticket IDs (e.g. \"MFT\" for oss/mesofact). Must be 2–4 uppercase ASCII letters. When omitted, derived from the directory name: multi-segment names (kebab/underscore) use the first letter of each segment; single-segment names use the first 3 characters. The code is parent-assigned and never persisted in the subcamp."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MachineConfig",
+  "description": "Per-machine TOML from `.yah/cloud/machines/<name>.toml`.",
+  "type": "object",
+  "required": [
+    "mesh_tags",
+    "name",
+    "provider"
+  ],
+  "properties": {
+    "bucket": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/BucketSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cloudflared": {
+      "description": "Cloudflare Tunnel ID this machine joins (e.g. `abc123.cfargotunnel.com`). `None` → no tunnel (mesh-only node, no public ingress). When set, `yah cloud machine provision` reads `cloudflare-tunnel-token` from the keys vault and injects the cloudflared install block into cloud-init so the new machine connects to CF edge on first boot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "connect": {
+      "description": "BYO `static`-node reach descriptor. Static nodes have no provider API to probe, so how the camp reaches them (SSH user@host + the warden URL, which is loopback until the WireGuard mesh lands) is *declared* here. `None` for driver-backed providers (Hetzner/Vultr), whose address is resolved from the provider API / mesh at provision time.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hostkey_fingerprint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hosts_mirrors": {
+      "description": "**Deprecated (R330-F16).** A machine should describe *itself* (region, zone, provider, mesh_tags); *which* mirrors run on it is derived by the reconciler from each mirror's `required` placement spec, not declared here. Now optional + omitted-when-empty so new machine.tomls leave it out. The legacy `resolve_mirror_machine` topology fallback still reads it until warden's reverse-index supersedes the topology.toml path; once that lands, this field and its readers are removed wholesale.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hosts_operator_bridge": {
+      "description": "When `true`, this machine hosts operator-bridge workloads (Tailscale operator access to mesh-internal services). `yah cloud machine provision` will install tailscaled and run `tailscale up` during cloud-init via the `{{OPERATOR_BRIDGE_BLOCK}}` placeholder. Defaults to `false` for backward-compat with existing machine declarations.",
+      "default": false,
+      "type": "boolean"
+    },
+    "location": {
+      "description": "Provider DC code (e.g. Hetzner `\"hil\"`). **Provisioning-only**: required iff the provider has an auto-provision driver ([`provider_has_machine_driver`]); a BYO `static` node we brought up over SSH has no such code. Optional at load time so static machine.tomls omit it; [`MachineConfig::validate`] enforces presence at the right moment for driver-backed providers.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mesh_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "region": {
+      "description": "Canonical geo region label (latency axis), e.g. `\"us-west\"`. F16's three topology axes are orthogonal: `region` = geo (latency), `zone` = failure domain within a region (HA), `provider` = network/cost. `region` is distinct from `location` (the provider's DC code, e.g. Hetzner `\"hil\"`): `location` is provider-scoped, `region` is our provider-neutral label. Optional for backward-compat; a machine without it never satisfies a `required.regions` constraint.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "server_type": {
+      "description": "Provider SKU/size (e.g. Hetzner `\"ccx13\"`). Provisioning-only, same optionality contract as [`location`](Self::location).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ssh_keys": {
+      "description": "Provider-side SSH-key IDs (Hetzner: from `GET /v1/ssh_keys`) authorized for `root` at create time. Defaults to empty for backwards-compat with existing machine declarations; an empty list yields a Hetzner-emailed random root password (which the driver currently discards). Populate this when you want pre-mesh SSH access for bootstrap deploys or recovery.",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    },
+    "zone": {
+      "description": "Failure-domain label within a region (HA axis), e.g. `\"hil\"`. For single-DC Hetzner this typically mirrors `location`. F16 placement matches `required.zones` against this. Optional for backward-compat.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "BucketSpec": {
+      "type": "object",
+      "required": [
+        "name",
+        "public_read"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "public_read": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ConnectSpec": {
+      "description": "Reach descriptor for a BYO `static` node (no provider API). Lives under `[connect]` in the machine TOML.",
+      "type": "object",
+      "required": [
+        "address",
+        "ssh",
+        "warden"
+      ],
+      "properties": {
+        "address": {
+          "description": "Reachable IPv4/host for the box, e.g. `\"45.32.194.254\"`.",
+          "type": "string"
+        },
+        "arch": {
+          "description": "Declared CPU arch (`\"x86_64\"` / `\"aarch64\"`) — no provider API to probe it, and the warden release triple depends on it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssh": {
+          "description": "SSH target the camp dials for bootstrap + (pre-mesh) tunneled deploys, e.g. `\"root@45.32.194.254\"` or `\"debian@15.204.89.240\"`. Uses the operator's `~/.ssh/yah` key.",
+          "type": "string"
+        },
+        "warden": {
+          "description": "Warden RPC URL. Loopback (`\"http://127.0.0.1:7443\"`) until the WireGuard mesh lands — reached via an SSH tunnel to `ssh`. Rebinds to the mesh IP in the post-mesh world (W242 P2).",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ServiceConfig",
+  "description": "An operator-facing service declaration from `.yah/services/<svc>/service.toml`.\n\nA service groups one or more components (a static surface, a containerized API, an almanac…) under a single domain. Mirrors project the service onto concrete infra; see [`MirrorConfig`].",
+  "type": "object",
+  "required": [
+    "domain",
+    "name",
+    "schema_version"
+  ],
+  "properties": {
+    "components": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ServiceComponent"
+      }
+    },
+    "domain": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "GitSource": {
+      "description": "A git source for a component (R561-F1, \"BYO git\").\n\nWhen a [`ServiceComponent`] sets `git`, the component's code is NOT in this workspace — it lives in an external repo that the reconciler shallow-clones into a source cache before build (approach A: clone-at-reconcile, so config load + validation stay offline). The component's `path` is then interpreted relative to `<checkout>/<subdir>` instead of the workspace root.",
+      "type": "object",
+      "required": [
+        "repo"
+      ],
+      "properties": {
+        "ref": {
+          "description": "Branch, tag, or commit SHA to check out. Defaults to `\"main\"`.",
+          "default": "main",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Clone URL (https or ssh) of the tenant repo.",
+          "type": "string"
+        },
+        "subdir": {
+          "description": "Optional sub-directory within the repo that the workspace is rooted at (e.g. a monorepo's `site/`). `path` is resolved relative to this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ServiceComponent": {
+      "description": "One component of a [`ServiceConfig`]. The `kind` (e.g. `\"mesofact-static\"`, `\"almanac\"`, `\"container\"`) selects which reconciler runs against the pointed-at workload manifest.",
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "role"
+      ],
+      "properties": {
+        "git": {
+          "description": "Optional external git source (R561-F1). When set, the component's code is materialized by shallow-clone before build; see [`GitSource`].",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "description": "Path of the directory holding this component's `workload.toml`. Relative to the workspace root for in-tree components, or to the materialized `<checkout>/<subdir>` when [`git`](Self::git) is set.",
+          "type": "string"
+        },
+        "publishes": {
+          "description": "Optional artifact kind this component publishes (`\"static\"`, `\"container-image\"`, …). Drives mirror provider-slot routing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Operator-facing role label, e.g. `\"static\"`, `\"dynamic\"`, `\"compute\"`.",
+          "type": "string"
+        },
+        "wave": {
+          "description": "Sync-wave index (0-based). Components in wave 0 roll out in parallel first; the reconciler waits for all wave-N components to become healthy before starting wave N+1. Defaults to 0 (all components in one wave).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

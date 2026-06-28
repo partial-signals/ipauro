@@ -1,0 +1,17 @@
+# Per-camp config for the IPAuRo subcamp.
+#
+# IPAuRo lives under the noisetable workspace tree, so its `@yah:ticket` /
+# `@yah:relay` annotations are picked up by the noisetable board's single-tree
+# scan automatically — there is no separate board here, and no `board/` state.
+# Ticket IDs come from the parent's shared sequence: ALWAYS run `yah board ...`
+# from the noisetable workspace root so allocation sees the whole tree.
+#
+# This nested `.yah` exists to give IPAuRo its own architecture graph, its own
+# A###/W### doc-ID counter, and its own agent context (CLAUDE.md) — scoped to
+# work happening inside oss/ipauro/.
+
+name = "ipauro"
+
+[approval.board]
+# Match the parent camp so ticket sweeps don't prompt per write-verb.
+writes = "auto"

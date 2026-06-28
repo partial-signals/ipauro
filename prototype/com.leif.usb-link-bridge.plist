@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.leif.usb-link-bridge</string>
+
+  <!-- Runs as root (LaunchDaemon in /Library/LaunchDaemons), so it never hits
+       the non-TTY sudo wall. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/sbin/usb-link-bridge.sh</string>
+    <string>reconcile</string>
+  </array>
+
+  <!-- Reconcile at boot/load... -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- ...and every 15s, which transparently handles USB attach/detach and
+       interface-index churn without needing IOKit event plumbing. The script
+       is idempotent and cheap, so polling is fine. -->
+  <key>StartInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/usb-link-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/usb-link-bridge.log</string>
+</dict>
+</plist>

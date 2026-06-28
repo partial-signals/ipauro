@@ -1,0 +1,18 @@
+# Default .yah/.gitignore for a yah camp. Written by scaffold_camp_skeleton
+# on camp init (skip-if-exists). These are the per-camp transient/derived
+# paths that must never be tracked — sessions, caches, runtime state. Durable
+# camp content (board/, docs/, subagents/, subclasses/, schema/, camp.toml,
+# *.md) IS tracked and intentionally absent from this list.
+/sessions
+/cache
+/jit
+/cloud
+/db
+/forms
+/operator-state.json
+/clipboard/
+/pending-payloads/
+/claude-spawn-settings.json
+/working-set
+.DS_Store
+/summaries/summary-*.md
