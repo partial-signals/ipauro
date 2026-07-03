@@ -1,0 +1,23 @@
+# ipauro-mesh — control plane for a tactus-native audio mesh.
+#
+# GPL orchestration that CONSUMES the MIT clean-room `tactus` crate via its
+# public API; it is not part of that crate and does not affect its provenance.
+# See src/lib.rs for the provenance note.
+[package]
+name = "ipauro-mesh"
+description = "Mesh control plane (overlay, gossip topology, routing, election) for a tactus-native audio mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Future deps for the adapter layer (versions illustrative):
+# tactus     = { path = "../../link-wire-rs/crates/tactus" }  # MIT wire crate
+# iroh       = "0.*"                                          # QUIC overlay
+# petgraph   = "0.6"                                          # topology graph
+# serde      = { workspace = true }
+#
+# The skeleton compiles against std only (no external types leak into the
+# public API); the adapters that bind `tactus` and `iroh` implement the traits
+# in `transport.rs`.

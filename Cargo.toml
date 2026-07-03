@@ -5,6 +5,7 @@ members = [
     "crates/ipauro-xpc",
     "crates/ipauro-core",
     "crates/ipauro-cli",
+    "crates/ipauro-mesh",
     "crates/ipauro-probe",
     "app/helper",
     "app/ui",
