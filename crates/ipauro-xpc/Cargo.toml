@@ -1,0 +1,10 @@
+[package]
+name = "ipauro-xpc"
+description = "Shared hand-rolled FFI over Apple's C XPC API (listener + client)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+block2 = { workspace = true }

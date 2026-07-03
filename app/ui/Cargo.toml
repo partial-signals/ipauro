@@ -1,0 +1,27 @@
+[package]
+name = "ipauro-ui"
+description = "IPAuRo tray client: Control-Center-style egui panel over the IPC API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ipauro-proto = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+eframe = "0.35.0"
+tray-icon = "0.24.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Self-registration of the core-agent SMAppService job (`service_bootstrap.rs`)
+# — only the SMAppService surface, mirroring ipauro-core's Cargo.toml.
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
+objc2-service-management = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-foundation",
+    "SMAppService",
+] }

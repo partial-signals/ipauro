@@ -1,0 +1,14 @@
+[package]
+name = "ipauro-probe"
+description = "Local Network gate probe (R002-T8): multicast join/beacon/report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+gethostname = "1.1"
+if-addrs = "0.13"
+socket2 = { version = "0.6", features = ["all"] }

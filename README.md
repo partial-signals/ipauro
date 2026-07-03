@@ -17,21 +17,27 @@ A###/W### doc space, agent context) but its tickets surface on the **noisetable 
 - **`.yah/docs/architecture/A002-ipauro-findings.md`** — every validated finding + correction +
   failure mode (the empirical base; each failure mode → a test case).
 - **`.yah/docs/architecture/A001-ipauro-architecture.md`** — detailed threads: desired-state
-  controller, N-hub/M-peer topology, de-`sudo`-ing into a tray app + privileged helper
-  (Docker/OrbStack model), test strategy.
+  controller, N-hub/M-peer topology, de-`sudo`-ing via a privileged helper (Docker/OrbStack
+  model; the brain/face split in W001 supersedes its tray-app framing), test strategy.
 - **`.yah/quests.md`** — the roadmap epic + M0–M5 tickets (live on the noisetable board).
 - **`prototype/`** — the working shell PoC = executable spec for the data plane. Port to Rust.
 
 ## TL;DR architecture
-- **User-space tray app (Tauri, unprivileged):** UI, hub/peer election, IOKit USB watch, holds
-  the macOS Local Network grant, desired-state brain, iroh control plane.
+- **Brain service (Rust, unprivileged, launchd/systemd-managed):** the product core —
+  desired-state brain, iroh control plane, IOKit USB watch, IPC server; holds the macOS Local
+  Network grant (execution-context placement validated at M0).
+- **UI client (egui, stateless):** a Control-Center-style transient tray panel / compact
+  metering widget — thin renderer/commander over the same IPC API external apps use; UI
+  quit/crash never touches the mesh.
 - **Privileged helper (`SMAppService`, root, inert):** bridge/`ifconfig`/`pfctl` only on the
-  app's XPC command; fails open on disconnect (quit/crash → restore default networking).
+  service's XPC command (caller-authenticated); fails open on disconnect (service death →
+  restore default networking).
 - **Control plane (iroh)** = identity/membership/topology/addressing; **data plane
-  (`if_bridge` + `pf`, later NetworkExtension)** = the actual transport. Protocol registry +
-  transport-policy engine generalize "prefer the good wire" beyond Link.
+  (`if_bridge` + `pf` anchors, later NetworkExtension)** = the actual transport. Protocol
+  registry + transport-policy engine generalize "prefer the good wire" beyond Link.
 
 ## First build target (de-risk the spine)
-`M0`: minimal Tauri + Rust + `SMAppService` helper that creates/destroys a bridge over XPC, with
-quit/crash → auto-destroy. Validates the whole privilege+lifecycle path before the (already
-de-risked) reconcile logic goes in. See `.yah/docs/working/W001-ipauro-plan.md` §6.
+`M0`: minimal brain service + `SMAppService` helper + IPC CLI client that creates/destroys a
+bridge over XPC, with service death → auto-destroy (fail-open). Validates the whole
+privilege+lifecycle path before the (already de-risked) reconcile logic goes in. See
+`.yah/docs/working/W001-ipauro-plan.md` §6.

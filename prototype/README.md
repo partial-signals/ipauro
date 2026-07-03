@@ -6,19 +6,23 @@ protocols) over pure USB-C / Thunderbolt between Macs**, instead of WiFi.
 **Status (2026-06-27): core thesis PROVEN on real hardware.** A 3-node mesh —
 relay + a clean MacBook Air + a corporate (CrowdStrike Falcon) MacBook Pro —
 ran a single synchronized Link session over **nothing but USB-C**, surviving WiFi
-being physically turned off on all three machines. See `../docs/FINDINGS.md`
-for the full blow-by-blow, including several scary conclusions that turned out to
-be wrong (the EDR was innocent; the kernel-bridge "host-egress" limitation was a
-ghost).
+being physically turned off on all three machines. See
+`../.yah/docs/architecture/A002-ipauro-findings.md` for the full blow-by-blow,
+including several scary conclusions that turned out to be wrong (the EDR was
+innocent; the kernel-bridge "host-egress" limitation was a ghost).
 
 ## The actual goal (where this is headed)
 
 A shippable app/library that builds arbitrary **USB/TB audio meshes**:
 **N hubs + M peers**, in **daisy-chain ∪ hub-and-spoke ∪ mixtures**, with a **UI to
-elect each machine as a hub (forwarder) or a peer (leaf)**. See `../docs/ARCHITECTURE.md`
-(Thread 3) for the topology architecture, and Thread 2 for de-`sudo`-ing it into a
-real app (privileged helper / NetworkExtension). The scripts here are the
-**executable spec** for the data-plane that the Rust core will eventually own.
+elect each machine as a hub (forwarder) or a peer (leaf)**. See
+`../.yah/docs/architecture/A001-ipauro-architecture.md` (Thread 3) for the topology
+architecture, and Thread 2 for de-`sudo`-ing it into a real app (privileged helper /
+NetworkExtension) — superseded where it differs by
+`../.yah/docs/working/W001-ipauro-plan.md`. The scripts here are the **executable
+spec** for the data-plane that the Rust core will eventually own (spec for the
+*behavior*, not the mechanism — the shipping helper uses pf anchors + selective
+state kill and an in-process DHCP responder, see R005-T5 / R005-T6).
 
 ## What's proven and how the pieces fit
 
@@ -90,7 +94,7 @@ so "packets on the wire" ≠ "app received them" — verify with the app's peer 
 - **Fail-safe:** never leave Link blocked if something crashes. `pf-prefer.sh` supports a TTL
   auto-restore (`--ttl <sec>`); the shipping app must tie the scope to its own lifecycle.
 - **Loop safety:** discovery only ever bridges USB-NCM members — never `en0`/WiFi/Thunderbolt
-  bridge. Multi-hub meshes will need spanning-tree (see NEXT-STEPS Thread 3).
+  bridge. Multi-hub meshes will need spanning-tree (see A001 Thread 3).
 
 ## Config (env vars)
 
@@ -103,6 +107,9 @@ so "packets on the wire" ≠ "app received them" — verify with the app's peer 
 | `PORT` (pf-prefer) | `20808` | audio protocol UDP port |
 
 ## See also
-- `../docs/FINDINGS.md` — every finding, correction, and failure mode (→ test cases).
-- `../docs/ARCHITECTURE.md` — Thread 1 (3-node/EDR: solved), Thread 2 (de-sudo the app),
-  Thread 3 (N-hub/M-peer topology + forwarding), and the test strategy.
+- `../.yah/docs/architecture/A002-ipauro-findings.md` — every finding, correction, and failure
+  mode (→ test cases).
+- `../.yah/docs/architecture/A001-ipauro-architecture.md` — Thread 1 (3-node/EDR: solved),
+  Thread 2 (de-sudo the app), Thread 3 (N-hub/M-peer topology + forwarding), and the test
+  strategy.
+- `../.yah/docs/working/W001-ipauro-plan.md` — the roadmap; supersedes A001 where they differ.

@@ -1,3 +1,29 @@
+<!--
+@yah:ticket(R009-T3, "Failure-mode suite: each A002 finding -> named case (cable-dead, charge-only, unapproved-accessory, stateful-pf-survival, bridge-host-egress, link-local-flap, member-unplug-blast-radius) + hardware runbook")
+@yah:at(2026-06-28T03:09:36Z)
+@yah:status(open)
+@yah:phase(P5)
+@yah:parent(R009)
+-->
+
+<!--
+@yah:ticket(R009-T2, "macOS-VM virtual-switch L2 tests: bridge flooding, host multicast egress, pf-forces-onto-interface — ALWAYS verify by teardown-and-re-establish (stateful-pf discipline)")
+@yah:at(2026-06-28T03:09:36Z)
+@yah:status(open)
+@yah:phase(P3)
+@yah:parent(R009)
+@yah:gotcha("Apple licensing caps macOS VMs at 2 per virtualization host — 2-node L2 behaviors virtualize fine; 4+-node meshes (R006-T5, R010-T5) belong to the hardware runbook, not this tier.")
+-->
+
+<!--
+@yah:ticket(R009-T1, "Control-plane CI in containers: discovery parsing, NodeId->address, pf/rule generation, gossip dedup/partition-heal, spanning-tree — no hardware")
+@yah:at(2026-06-28T03:09:36Z)
+@yah:status(open)
+@yah:phase(P1)
+@yah:parent(R009)
+@yah:gotcha("Lands ALONGSIDE M1, not after M5 — the rule-generator and reconciler ports (R005) should grow their CI the day they're written, per the capabilities-merge-with-a-test rule.")
+-->
+
 # IPAuRo Findings — USB Mac-to-Mac Bridging for Ableton Link
 
 **Status:** Empirical base (hardware-validated). Each failure mode → a test case.
@@ -5,7 +31,8 @@
 `@arch:see(.yah/docs/working/W001-ipauro-plan.md)` — roadmap.
 
 Date: 2026-06-25/27
-Host: this Mac (Apple Silicon, macOS 25.5 / "Darwin 25.5.0")
+Host: this Mac (Apple Silicon, macOS 26.5 / Darwin 25.5.0 — macOS major = Darwin major + 1; an
+earlier draft mislabeled this "macOS 25.5")
 
 ## 1. Goal & topology
 
@@ -160,7 +187,7 @@ on the en10 wire — proving L2 flooding between the two USB segments works.
   Thunderbolt/USB4 cable removes this variable. (Reboot of the peer also clears stuck
   half-approved state.)
 
-### Verified live against a third Mac (MetrcAdmins, M1, macOS 15.7.3)
+### Verified live against a third Mac (CorpAdmins, M1, macOS 15.7.3)
 
 - **A charge-only / marginal USB-C cable is indistinguishable from "macOS hid the link"
   until you look at IOKit.** Symptom: prompt fired once, then nothing; BOTH Macs' IOUSB
@@ -186,10 +213,10 @@ on the en10 wire — proving L2 flooding between the two USB segments works.
 
 ### macOS 15 "Local Network" privacy gate — the REAL blocker (Falcon was innocent)
 
-**CORRECTION.** We initially blamed CrowdStrike Falcon on the Metrc machine for dropping Link.
+**CORRECTION.** We initially blamed CrowdStrike Falcon on the Corp machine for dropping Link.
 That was WRONG — a classic "saw the EDR, blamed the EDR" correlation error. The actual cause:
 **macOS 15 (Sequoia) Local Network privacy + launching the app over SSH.** Proven by launching
-the same binary from Metrc's GUI Terminal → it immediately reached `peers 2` and joined the
+the same binary from Corp's GUI Terminal → it immediately reached `peers 2` and joined the
 3-node session over USB. Falcon never touched it.
 
 - **macOS 15+ gates each app's local-network traffic** (multicast + local-subnet unicast)
@@ -199,7 +226,7 @@ the same binary from Metrc's GUI Terminal → it immediately reached `peers 2` a
   and macOS then drops their local multicast — packets reach the NIC/kernel (ICMP replies
   work, `tcpdump` shows them) but never reach the app socket. This is the exact
   "arrives-but-app-silent" symptom we misattributed to the EDR's NEFilterDataProvider.
-- **The corroboration we ignored:** the Air that worked is **Sonoma 14.8.5 (no gate)**; Metrc
+- **The corroboration we ignored:** the Air that worked is **Sonoma 14.8.5 (no gate)**; Corp
   is **Sequoia 15.7.3 (gated)**. Same binary, same network — the only difference was the OS
   version that added the permission. Launch context (GUI vs SSH) was the hidden variable.
 - **Fix:** run the app in a context that holds Local Network permission — a GUI app the user
@@ -254,10 +281,10 @@ We initially feared macOS `if_bridge` floods member↔member multicast but won't
 host's OWN (relay-originated) multicast to members — which would mean a forwarding hub couldn't
 also participate in Link (fatal for daisy chains, where every interior node is a hub-and-peer).
 An early test suggested this, but it was confounded (an `en9` split-brain with a stale
-`169.254` alias + Metrc's Local Network privacy gate).
+`169.254` alias + Corp's Local Network privacy gate).
 
 **Retested clean and it WORKS:** relay + 2 spokes all bridged onto one subnet
-(`10.69.0.0/24`: relay `bridge90`=.1, Metrc=.2, Air=.3), relay's `link_audio_hut` bound to the
+(`10.69.0.0/24`: relay `bridge90`=.1, Corp=.2, Air=.3), relay's `link_audio_hut` bound to the
 `bridge90` interface → **all three reached `peers 2`** (full mesh). The relay's host-originated
 Link multicast reached both members.
 
@@ -273,9 +300,9 @@ Implications for the N-hub/M-peer product (ARCHITECTURE Thread 3):
 
 ### Unplugging ONE USB member destroys the whole bridge (replug blast radius)
 
-Live incident: with a 3-node mesh up (relay bridging `en9`=Metrc + `en12`=Air), unplugging and
+Live incident: with a 3-node mesh up (relay bridging `en9`=Corp + `en12`=Air), unplugging and
 replugging the **Air** cable **tore down the entire `bridge90`** — not just the Air's link.
-Metrc dropped too, because its bridge evaporated out from under it (`en9` was orphaned, lost the
+Corp dropped too, because its bridge evaporated out from under it (`en9` was orphaned, lost the
 `10.69.0.1` it reached the subnet through). Interfaces did NOT renumber (`en9`–`en12` reused),
 and the Air kept `10.69.0.3` — only the relay-side bridge died.
 

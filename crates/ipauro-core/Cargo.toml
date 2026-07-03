@@ -1,0 +1,32 @@
+[package]
+name = "ipauro-core"
+description = "IPAuRo brain service: desired-state store, IPC server, helper channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ipauro-proto = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1.89"
+clap.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ipauro-xpc = { workspace = true }
+block2 = { workspace = true }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
+# Only the SMAppService surface: default features also pull in SMErrors,
+# SMLoginItem, and objc2-security (legacy SMJobBless-era APIs) that this
+# crate never calls.
+objc2-service-management = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-foundation",
+    "SMAppService",
+] }

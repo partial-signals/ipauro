@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  R002-T8 probe: user LaunchAgent context, loaded into the Aqua (logged-in
+  GUI) session via the `gui/<uid>` launchd domain. Apple's docs suggest an
+  agent in this domain CAN be silently denied Local Network access without
+  ever showing the permission prompt -- this plist exists to verify that
+  empirically rather than trust the docs (see RUNBOOK.md).
+
+  BEFORE installing:
+    1. Build the binary: cargo build --release -p ipauro-probe
+    2. Replace __IPAURO_PROBE_BIN__ below with the absolute path to it
+       (e.g. /Users/you/ipauro/target/release/ipauro-probe).
+    3. Install per RUNBOOK.md's "user LaunchAgent (Aqua)" section.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.ipauro.probe.agent</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__IPAURO_PROBE_BIN__</string>
+		<string>check</string>
+		<string>--seconds</string>
+		<string>10</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>/tmp/ipauro-probe-agent.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/tmp/ipauro-probe-agent.err.log</string>
+</dict>
+</plist>

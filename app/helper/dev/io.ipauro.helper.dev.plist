@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DEV-ONLY LaunchDaemon for ipauro-helper. Runs the debug binary straight out
+  of the cargo workspace target dir (no packaging/signing) so the M0 spine
+  (XPC listener, bridge90 lifecycle, fail-open) can be exercised end-to-end
+  without a real app bundle. See app/helper/README.md before using this.
+
+  NEVER ship this file, and NEVER carry IPAURO_INSECURE_DEV into a real
+  install -- it exists only because a local `cargo build` binary is unsigned
+  (or ad-hoc signed), so it cannot satisfy the real peer_requirement() code
+  signing check the shipping helper enforces.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.ipauro.helper</string>
+
+  <!-- Must match crates/ipauro-proto's ids::HELPER_LABEL exactly -- replace
+       __IPAURO_REPO__ with your absolute checkout path before bootstrapping
+       (see README.md). -->
+  <key>Program</key>
+  <string>__IPAURO_REPO__/target/debug/ipauro-helper</string>
+
+  <!-- Must match ipauro_proto::ids::HELPER_LABEL: this is the mach service
+       name our xpc_connection_create_mach_service(..., LISTENER) call in
+       listener.rs registers as the listener for. -->
+  <key>MachServices</key>
+  <dict>
+    <key>io.ipauro.helper</key>
+    <true/>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart on crash/exit so the mach service stays available across dev
+       iteration; also lets you exercise the fail-open "service restart
+       grace" behavior (kill -9 the pid and watch it come back within
+       FAILOPEN_GRACE_SECS without the bridge being torn down). -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Dev convenience only: disables peer code-signing validation, because
+       an unsigned/ad-hoc-signed `cargo build` binary cannot satisfy
+       peer_requirement()'s "anchor apple generic and certificate
+       leaf[subject.OU] = <team id>" requirement, and neither can any client
+       built the same way. NEVER set this in a real install. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>IPAURO_INSECURE_DEV</key>
+    <string>1</string>
+    <key>RUST_LOG</key>
+    <string>debug</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/io.ipauro.helper.dev.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/io.ipauro.helper.dev.log</string>
+</dict>
+</plist>
