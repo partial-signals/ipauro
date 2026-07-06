@@ -14,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Notify};
 
 use crate::commands;
+use crate::discovery::UsbNcmSource;
 use crate::helper_channel::HelperChannel;
 use crate::registrar::HelperRegistrar;
 use crate::state_store::StateStore;
@@ -42,6 +43,7 @@ fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
 pub struct ServerHandles {
     pub store: Arc<StateStore>,
     pub helper: Arc<dyn HelperChannel>,
+    pub usb_source: Arc<dyn UsbNcmSource>,
     pub registrar: Arc<dyn HelperRegistrar>,
     pub reconcile_kick: Arc<Notify>,
 }
@@ -82,7 +84,7 @@ pub async fn run(
 }
 
 async fn handle_connection(stream: UnixStream, handles: ServerHandles) -> anyhow::Result<()> {
-    let ServerHandles { store, helper, registrar, reconcile_kick } = handles;
+    let ServerHandles { store, helper, usb_source, registrar, reconcile_kick } = handles;
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -125,7 +127,15 @@ async fn handle_connection(stream: UnixStream, handles: ServerHandles) -> anyhow
                 match msg? {
                     None => break, // clean EOF
                     Some(ClientMessage::Command { id, command }) => {
-                        let outcome = commands::handle(&store, helper.as_ref(), registrar.as_ref(), &reconcile_kick, command).await;
+                        let outcome = commands::handle(
+                            &store,
+                            helper.as_ref(),
+                            usb_source.as_ref(),
+                            registrar.as_ref(),
+                            &reconcile_kick,
+                            command,
+                        )
+                        .await;
                         write_server_message(&mut write_half, &ServerMessage::Reply { id, outcome }).await?;
                     }
                     Some(ClientMessage::Hello { .. }) => {

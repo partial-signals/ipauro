@@ -73,6 +73,19 @@ fn show_status(ui: &mut Ui, vm: &crate::viewmodel::PanelViewModel, commands: &Se
         let command = if vm.bridge_desired_up { Command::BridgeDown } else { Command::BridgeUp };
         let _ = commands.send(command);
     }
+    ui.add_space(8.0);
+
+    ui.label(egui::RichText::new("Transport").strong());
+    ui.label(format!("Link scope: {}", vm.link_scope_line));
+    ui.label(format!("DHCP: {}", vm.dhcp_line));
+    ui.add_space(12.0);
+
+    let scope_label =
+        if vm.link_scope_desired { "Turn Link Scope Off" } else { "Turn Link Scope On" };
+    let scope_button = egui::Button::new(egui::RichText::new(scope_label).size(16.0));
+    if ui.add_sized([ui.available_width(), 36.0], scope_button).clicked() {
+        let _ = commands.send(Command::SetTransportScope { enabled: !vm.link_scope_desired });
+    }
 }
 
 /// The transient command-status/"starting service…" line. Renders nothing

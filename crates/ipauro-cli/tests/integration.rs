@@ -31,6 +31,7 @@ fn hello_snapshot() -> Snapshot {
         service: ServiceInfo { version: "9.9.9-fake".into(), pid: 4242, started_unix: 1_700_000_000 },
         helper: HelperState::Connected { version: "9.9.9-fake".into() },
         bridge: BridgeState { desired_up: false, actual: None },
+        transport: Default::default(),
     }
 }
 
@@ -42,8 +43,10 @@ fn bridge_up_snapshot() -> Snapshot {
                 name: "bridge90".into(),
                 members: vec!["en9".into(), "en12".into()],
                 ipv4: Some("10.69.0.1".into()),
+                prefix: None,
             }),
         },
+        transport: Default::default(),
         ..hello_snapshot()
     }
 }

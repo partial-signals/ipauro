@@ -61,7 +61,21 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ipauro_core::registrar::StubHelperRegistrar)
         }
     };
-    let config = ipauro_core::ServiceConfig { socket_path, helper, registrar };
+    // --- The USB-NCM discovery seam. ---
+    // Real `ioreg`-backed source on macOS (the only platform with IOKit/USB-
+    // NCM); no discovery mechanism exists elsewhere.
+    let usb_source: Arc<dyn ipauro_core::discovery::UsbNcmSource> = {
+        #[cfg(target_os = "macos")]
+        {
+            Arc::new(ipauro_core::discovery::IoregUsbNcmSource::new())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Arc::new(ipauro_core::discovery::NoUsbNcmSource)
+        }
+    };
+
+    let config = ipauro_core::ServiceConfig { socket_path, helper, registrar, usb_source };
 
     ipauro_core::serve(config, shutdown_signal()).await
 }

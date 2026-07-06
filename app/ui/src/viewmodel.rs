@@ -3,7 +3,7 @@
 //! `panel.rs`/`widget.rs` free of string formatting and enum-variant
 //! matching.
 
-use ipauro_proto::state::{BridgeState, HelperState, ServiceInfo, Snapshot};
+use ipauro_proto::state::{BridgeState, HelperState, ServiceInfo, Snapshot, TransportState};
 
 use crate::state::StatusLine;
 
@@ -25,6 +25,15 @@ pub struct PanelViewModel {
     /// "what will clicking this do", rather than lagging while the service
     /// converges actual → desired.
     pub bridge_desired_up: bool,
+    /// Desired-vs-actual rendering for the Link transport scope: "on",
+    /// "on (pending)", "off (pending)", "off" — mirrors `ipauro-cli`'s
+    /// `scope_line` convention (`crates/ipauro-cli/src/format.rs`).
+    pub link_scope_line: String,
+    /// "serving" / "off" for the in-process DHCP responder.
+    pub dhcp_line: String,
+    /// Mirrors `link_scope_desired`, not `link_scoped` — same "what will
+    /// clicking this do" convention as `bridge_desired_up`.
+    pub link_scope_desired: bool,
 }
 
 /// The panel's transient status line (command errors, "starting
@@ -38,11 +47,14 @@ pub struct StatusLineViewModel {
 }
 
 /// Rows for the compact always-on-top widget (`widget.rs`): a status dot +
-/// member count.
+/// member count + a tiny link-scope dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactViewModel {
     pub bridge_up: bool,
     pub member_count: usize,
+    /// Whether Link's ports are actually pf-scoped right now (actual state,
+    /// not desired — this is a glance-only display, no toggle here).
+    pub link_scoped: bool,
 }
 
 pub fn panel_view_model(snapshot: &Snapshot, now_unix: u64) -> PanelViewModel {
@@ -55,6 +67,9 @@ pub fn panel_view_model(snapshot: &Snapshot, now_unix: u64) -> PanelViewModel {
         bridge_members_line: bridge_members_line(&snapshot.bridge),
         bridge_ipv4_line: bridge_ipv4_line(&snapshot.bridge),
         bridge_desired_up: snapshot.bridge.desired_up,
+        link_scope_line: link_scope_line(&snapshot.transport),
+        dhcp_line: dhcp_line(&snapshot.transport),
+        link_scope_desired: snapshot.transport.link_scope_desired,
     }
 }
 
@@ -81,6 +96,7 @@ pub fn compact_view_model(snapshot: &Snapshot) -> CompactViewModel {
     CompactViewModel {
         bridge_up: snapshot.bridge.actual.is_some(),
         member_count: snapshot.bridge.actual.as_ref().map_or(0, |info| info.members.len()),
+        link_scoped: snapshot.transport.link_scoped,
     }
 }
 
@@ -167,6 +183,30 @@ fn bridge_ipv4_line(bridge: &BridgeState) -> String {
     }
 }
 
+/// Desired-vs-actual rendering for the Link transport scope. Mirrors
+/// `ipauro-cli`'s private `scope_line` (`crates/ipauro-cli/src/format.rs`):
+/// all four `(desired, actual)` combinations rendered explicitly — no
+/// catch-all — so "requested but not yet applied" and "cleared but not yet
+/// torn down" are each their own distinct, honest label instead of collapsing
+/// to a single ambiguous "on"/"off".
+fn link_scope_line(transport: &TransportState) -> String {
+    match (transport.link_scope_desired, transport.link_scoped) {
+        (true, true) => "on".to_string(),
+        (true, false) => "on (pending)".to_string(),
+        (false, true) => "off (pending)".to_string(),
+        (false, false) => "off".to_string(),
+    }
+}
+
+/// Whether the in-process DHCP responder is serving on the bridge. This has
+/// no separate "desired" bit in `TransportState` (it's driven implicitly by
+/// the bridge's own desired/actual reconciliation), so — unlike the bridge
+/// and link-scope rows — there's nothing to compare against and no
+/// "(pending)" case here.
+fn dhcp_line(transport: &TransportState) -> String {
+    if transport.dhcp_serving { "serving".to_string() } else { "off".to_string() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +217,16 @@ mod tests {
             service: ServiceInfo { version: "1.2.3".into(), pid: 99, started_unix: 1_000 },
             helper,
             bridge,
+            transport: Default::default(),
+        }
+    }
+
+    fn snapshot_with_transport(transport: TransportState) -> Snapshot {
+        Snapshot {
+            service: ServiceInfo { version: "1.2.3".into(), pid: 99, started_unix: 1_000 },
+            helper: HelperState::NotRegistered,
+            bridge: BridgeState { desired_up: false, actual: None },
+            transport,
         }
     }
 
@@ -237,6 +287,7 @@ mod tests {
                     name: "bridge90".into(),
                     members: vec!["en9".into(), "en12".into()],
                     ipv4: Some("10.69.0.1".into()),
+                    prefix: None,
                 }),
             },
         );
@@ -312,7 +363,7 @@ mod tests {
             HelperState::NotRegistered,
             BridgeState {
                 desired_up: true,
-                actual: Some(BridgeInfo { name: "bridge90".into(), members: vec![], ipv4: None }),
+                actual: Some(BridgeInfo { name: "bridge90".into(), members: vec![], ipv4: None, prefix: None }),
             },
         );
         let vm = panel_view_model(&snapshot, 1_000);
@@ -330,6 +381,7 @@ mod tests {
                     name: "bridge90".into(),
                     members: vec!["en9".into(), "en12".into(), "en13".into()],
                     ipv4: None,
+                    prefix: None,
                 }),
             },
         );
@@ -347,5 +399,82 @@ mod tests {
         let vm = compact_view_model(&snapshot);
         assert!(!vm.bridge_up);
         assert_eq!(vm.member_count, 0);
+    }
+
+    /// All four `(desired, actual)` combinations rendered explicitly and
+    /// correctly, matching `ipauro-cli`'s `scope_line` convention.
+    #[test]
+    fn link_scope_line_covers_every_desired_actual_combo() {
+        let combos = [
+            (true, true, "on"),
+            (true, false, "on (pending)"),
+            (false, true, "off (pending)"),
+            (false, false, "off"),
+        ];
+        for (desired, actual, expected) in combos {
+            let transport = TransportState {
+                link_scope_desired: desired,
+                link_scoped: actual,
+                dhcp_serving: false,
+            };
+            assert_eq!(
+                link_scope_line(&transport),
+                expected,
+                "desired={desired} actual={actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn dhcp_line_reflects_serving_state() {
+        assert_eq!(
+            dhcp_line(&TransportState {
+                link_scope_desired: false,
+                link_scoped: false,
+                dhcp_serving: true
+            }),
+            "serving"
+        );
+        assert_eq!(
+            dhcp_line(&TransportState {
+                link_scope_desired: false,
+                link_scoped: false,
+                dhcp_serving: false
+            }),
+            "off"
+        );
+    }
+
+    #[test]
+    fn panel_view_model_wires_transport_fields_through() {
+        let snapshot = snapshot_with_transport(TransportState {
+            link_scope_desired: true,
+            link_scoped: false,
+            dhcp_serving: true,
+        });
+        let vm = panel_view_model(&snapshot, 1_000);
+        assert_eq!(vm.link_scope_line, "on (pending)");
+        assert_eq!(vm.dhcp_line, "serving");
+        assert!(vm.link_scope_desired);
+    }
+
+    #[test]
+    fn compact_view_model_reflects_link_scoped_actual_state() {
+        let snapshot = snapshot_with_transport(TransportState {
+            link_scope_desired: true,
+            link_scoped: true,
+            dhcp_serving: false,
+        });
+        let vm = compact_view_model(&snapshot);
+        assert!(vm.link_scoped);
+
+        let snapshot = snapshot_with_transport(TransportState {
+            link_scope_desired: true,
+            link_scoped: false,
+            dhcp_serving: false,
+        });
+        let vm = compact_view_model(&snapshot);
+        // Compact widget shows actual, not desired — pending scope isn't "on" yet.
+        assert!(!vm.link_scoped);
     }
 }

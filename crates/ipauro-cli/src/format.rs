@@ -87,8 +87,26 @@ pub fn pretty_snapshot(snapshot: &Snapshot) -> String {
             bridge_actual_line(&snapshot.bridge.actual),
             bridge_pending_note(&snapshot.bridge)
         ),
+        String::new(),
+        "transport:".to_string(),
+        format!("  link scope  {}", scope_line(&snapshot.transport)),
+        format!(
+            "  dhcp        {}",
+            if snapshot.transport.dhcp_serving { "serving" } else { "off" }
+        ),
     ];
     lines.join("\n")
+}
+
+/// Desired-vs-actual rendering for the Link transport scope, mirroring the
+/// bridge's own pending convention.
+fn scope_line(t: &ipauro_proto::state::TransportState) -> String {
+    match (t.link_scope_desired, t.link_scoped) {
+        (true, true) => "on".to_string(),
+        (true, false) => "on  (pending)".to_string(),
+        (false, true) => "off (pending)".to_string(),
+        (false, false) => "off".to_string(),
+    }
 }
 
 /// One-line rendering of an event for `ipauro watch`'s pretty mode.
@@ -136,8 +154,10 @@ mod tests {
                     name: "bridge90".into(),
                     members: vec!["en9".into(), "en12".into()],
                     ipv4: Some("10.69.0.1".into()),
+                    prefix: None,
                 }),
             },
+            transport: Default::default(),
         }
     }
 
@@ -193,7 +213,7 @@ mod tests {
     #[test]
     fn bridge_actual_line_handles_none_and_missing_ipv4() {
         assert_eq!(bridge_actual_line(&None), "none");
-        let info = BridgeInfo { name: "bridge90".into(), members: vec![], ipv4: None };
+        let info = BridgeInfo { name: "bridge90".into(), members: vec![], ipv4: None, prefix: None };
         assert_eq!(bridge_actual_line(&Some(info)), "bridge90 [] no ipv4");
     }
 

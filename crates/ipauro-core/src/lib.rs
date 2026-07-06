@@ -11,6 +11,7 @@
 //! `main.rs` for the one-line seam where the real XPC implementation plugs in.
 
 pub mod commands;
+pub mod discovery;
 pub mod helper_channel;
 pub mod reconcile;
 pub mod registrar;
@@ -18,6 +19,7 @@ pub mod registrar;
 pub mod registrar_smapp;
 pub mod server;
 pub mod state_store;
+pub mod watch;
 #[cfg(target_os = "macos")]
 pub mod xpc_helper;
 
@@ -29,19 +31,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ipauro_proto::state::{BridgeState, HelperState, ServiceInfo, Snapshot};
 use tokio::sync::{broadcast, Notify};
 
+use discovery::UsbNcmSource;
 use helper_channel::HelperChannel;
 use registrar::HelperRegistrar;
 use server::ServerHandles;
 use state_store::StateStore;
 
-/// Everything needed to boot the service. The helper channel/registrar are
-/// the seam: swap `NullHelper`/`StubHelperRegistrar` for real XPC-backed and
-/// `SMAppService`-backed implementations here and nothing else in this crate
-/// changes.
+/// Everything needed to boot the service. The helper channel/registrar/USB
+/// source are the seam: swap `NullHelper`/`StubHelperRegistrar`/
+/// `NoUsbNcmSource` for real XPC-backed, `SMAppService`-backed, and
+/// `ioreg`-backed implementations here and nothing else in this crate changes.
 pub struct ServiceConfig {
     pub socket_path: PathBuf,
     pub helper: Arc<dyn HelperChannel>,
     pub registrar: Arc<dyn HelperRegistrar>,
+    pub usb_source: Arc<dyn UsbNcmSource>,
 }
 
 /// The snapshot every service instance boots with: no helper connection yet,
@@ -57,6 +61,7 @@ pub fn initial_snapshot() -> Snapshot {
         },
         helper: HelperState::NotRegistered,
         bridge: BridgeState { desired_up: false, actual: None },
+        transport: Default::default(),
     }
 }
 
@@ -72,6 +77,16 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
     let reconcile_task = tokio::spawn(reconcile::run(
         store.clone(),
         config.helper.clone(),
+        config.usb_source.clone(),
+        reconcile_kick.clone(),
+        shutdown_tx.subscribe(),
+    ));
+    // Fast-path watch: kicks `reconcile_kick` on any USB-NCM interface change
+    // (replug), well inside the 15s poll backstop `reconcile::run` already
+    // provides on its own — see `watch`'s module docs for the mechanism
+    // choice (ticket R005-F1).
+    let watch_task = tokio::spawn(watch::run(
+        config.usb_source.clone(),
         reconcile_kick.clone(),
         shutdown_tx.subscribe(),
     ));
@@ -79,6 +94,7 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
     let handles = ServerHandles {
         store: store.clone(),
         helper: config.helper.clone(),
+        usb_source: config.usb_source.clone(),
         registrar: config.registrar.clone(),
         reconcile_kick: reconcile_kick.clone(),
     };
@@ -125,10 +141,11 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
         }
         result = &mut server_task => result,
     };
-    // Idempotent if already sent above; ensures the reconcile loop stops when
-    // the server died on its own.
+    // Idempotent if already sent above; ensures the reconcile loop and the
+    // watch task stop when the server died on its own.
     let _ = shutdown_tx.send(());
     let _ = reconcile_task.await;
+    let _ = watch_task.await;
 
     match server_result {
         Ok(inner) => inner,

@@ -2117,8 +2117,10 @@ dependencies = [
  "env_logger",
  "ipauro-proto",
  "ipauro-xpc",
+ "libc",
  "log",
  "serde_json",
+ "socket2",
 ]
 
 [[package]]

@@ -57,6 +57,11 @@ pub enum Cmd {
         #[command(subcommand)]
         action: HelperAction,
     },
+    /// Pin Link's ports to the bridge via pf (M1 transport scoping).
+    Scope {
+        #[command(subcommand)]
+        action: ScopeAction,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +74,12 @@ pub enum BridgeAction {
 pub enum HelperAction {
     Register,
     Unregister,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeAction {
+    On,
+    Off,
 }
 
 /// Run the CLI's client logic end to end: connect, Hello handshake, dispatch
@@ -157,6 +168,13 @@ pub fn run(cli: Cli, out: &mut dyn Write, err_out: &mut dyn Write) -> i32 {
             let command = match action {
                 HelperAction::Register => Command::RegisterHelper,
                 HelperAction::Unregister => Command::UnregisterHelper,
+            };
+            client::run_command(&mut writer, &mut reader, command, cli.json, out, err_out)
+        }
+        Cmd::Scope { action } => {
+            let command = match action {
+                ScopeAction::On => Command::SetTransportScope { enabled: true },
+                ScopeAction::Off => Command::SetTransportScope { enabled: false },
             };
             client::run_command(&mut writer, &mut reader, command, cli.json, out, err_out)
         }

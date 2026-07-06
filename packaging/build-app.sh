@@ -141,6 +141,14 @@ cat > "${CORE_PLIST}" <<PLIST
 	<array>
 		<string>${BUNDLE_ID}</string>
 	</array>
+	<!-- Verified live (M0 first install): SMAppService agent registration
+	     alone does NOT launch the job — without RunAtLoad the agent sits
+	     "uninitialized" until a manual launchctl kickstart. RunAtLoad starts
+	     it at registration/login. KeepAlive is deliberately NOT set yet:
+	     crash-restart semantics interact with fail-open + desired-state
+	     persistence and get decided in M1, not slipped in here. -->
+	<key>RunAtLoad</key>
+	<true/>
 </dict>
 </plist>
 PLIST

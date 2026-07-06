@@ -4,7 +4,7 @@
 //! "the service's desired-state store is the single source of truth; every
 //! client ... is a commander/renderer kept in sync by snapshot+events."
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ipauro_proto::ipc::EventBody;
 use ipauro_proto::state::Snapshot;
@@ -31,12 +31,41 @@ pub struct StateStore {
     inner: RwLock<Snapshot>,
     seq: AtomicU64,
     tx: broadcast::Sender<Event>,
+    /// `SetTransportScope`'s desired flag (M1, ticket R004-T2's precursor).
+    /// Deliberately snapshot-ADJACENT rather than part of the wire
+    /// [`Snapshot`]: `ipauro-proto` is manager-owned, and its
+    /// `TransportState` carries only OBSERVED status (`link_scoped`,
+    /// `dhcp_serving`) — never a request — so there is no wire field to put a
+    /// "desired" bit in without a proto change (flagged in the M1 report as a
+    /// candidate future addition). `reconcile::drive_once` reads this
+    /// alongside `Snapshot.bridge.desired_up` to build a `reconcile::Desired`.
+    desired_scope_enabled: AtomicBool,
 }
 
 impl StateStore {
     pub fn new(initial: Snapshot) -> Self {
         let (tx, _rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        Self { inner: RwLock::new(initial), seq: AtomicU64::new(0), tx }
+        Self {
+            inner: RwLock::new(initial),
+            seq: AtomicU64::new(0),
+            tx,
+            desired_scope_enabled: AtomicBool::new(false),
+        }
+    }
+
+    /// Current `SetTransportScope` desired flag. See the field doc for why
+    /// this lives here instead of on the wire `Snapshot`.
+    pub fn desired_scope_enabled(&self) -> bool {
+        self.desired_scope_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Sets the `SetTransportScope` desired flag. Does not itself touch the
+    /// wire snapshot or broadcast an event — the reconciler's next pass is
+    /// what makes the change observable, via `transport.link_scoped` once the
+    /// helper confirms it (`commands::handle` kicks reconcile right after
+    /// calling this).
+    pub fn set_desired_scope_enabled(&self, enabled: bool) {
+        self.desired_scope_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// A clone of the current state. Used for `Hello` (snapshot-on-connect)

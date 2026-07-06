@@ -20,33 +20,34 @@
 //! block dropped on the Rust side immediately after being registered still
 //! fired correctly when a real event arrived later.
 
-use crate::executor::BridgeExecutor;
-use crate::failopen::{Action, FailOpen};
-use crate::request::handle_request;
-use crate::xpc_sys::{self, classify_event, SendableXpcObject, XpcConnection, XpcEvent, XpcObject};
-use anyhow::{anyhow, Context, Result};
-use block2::RcBlock;
-use ipauro_proto::helper::{HelperRequest, HelperResponse, FAILOPEN_GRACE_SECS, INSECURE_DEV_ENV};
-use ipauro_proto::ids::HELPER_LABEL;
 use std::ffi::CString;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Shared daemon state: the bridge executor, the fail-open timer, and
-/// whether peer authentication is disabled (dev builds only).
+use anyhow::{Context, Result, anyhow};
+use block2::RcBlock;
+use ipauro_proto::helper::{FAILOPEN_GRACE_SECS, HelperRequest, HelperResponse, INSECURE_DEV_ENV};
+use ipauro_proto::ids::HELPER_LABEL;
+
+use crate::failopen::{self, Action, FailOpen};
+use crate::request::{Executors, handle_request};
+use crate::xpc_sys::{self, SendableXpcObject, XpcConnection, XpcEvent, XpcObject, classify_event};
+
+/// Shared daemon state: the bridge/pf/dhcp executors, the fail-open timer,
+/// and whether peer authentication is disabled (dev builds only).
 pub struct HelperState {
-    executor: Arc<dyn BridgeExecutor>,
+    executors: Executors,
     failopen: Mutex<FailOpen>,
     insecure_dev: bool,
     requirement: CString,
 }
 
 impl HelperState {
-    pub fn new(executor: Arc<dyn BridgeExecutor>, insecure_dev: bool) -> Self {
+    pub fn new(executors: Executors, insecure_dev: bool) -> Self {
         Self {
-            executor,
+            executors,
             failopen: Mutex::new(FailOpen::new(Duration::from_secs(FAILOPEN_GRACE_SECS))),
             insecure_dev,
             requirement: CString::new(ipauro_proto::helper::peer_requirement())
@@ -117,7 +118,10 @@ fn accept_peer(state: &Arc<HelperState>, peer: XpcConnection) {
         log::warn!("{INSECURE_DEV_ENV}=1 — accepting peer WITHOUT code-signing validation");
     } else {
         let rc = unsafe {
-            xpc_sys::xpc_connection_set_peer_code_signing_requirement(peer, state.requirement.as_ptr())
+            xpc_sys::xpc_connection_set_peer_code_signing_requirement(
+                peer,
+                state.requirement.as_ptr(),
+            )
         };
         if rc != 0 {
             log::error!(
@@ -160,7 +164,9 @@ fn on_peer_event(
         }
         XpcEvent::TerminationImminent => log::warn!("termination imminent (peer connection)"),
         XpcEvent::PeerCodeSigningRequirementFailed => {
-            log::warn!("a message from this peer failed the code-signing requirement; dropped by libxpc");
+            log::warn!(
+                "a message from this peer failed the code-signing requirement; dropped by libxpc"
+            );
         }
         XpcEvent::NewConnection(_) => {
             log::warn!("peer connection received a new-connection event (unexpected)");
@@ -177,7 +183,10 @@ fn mark_disconnected(state: &Arc<HelperState>, disconnected: &Arc<AtomicBool>) {
     }
     let mut failopen = state.failopen.lock().expect("failopen mutex poisoned");
     failopen.on_disconnect(Instant::now());
-    log::info!("peer disconnected; {} authenticated connection(s) remain", failopen.live_connections());
+    log::info!(
+        "peer disconnected; {} authenticated connection(s) remain",
+        failopen.live_connections()
+    );
 }
 
 fn handle_message(state: &Arc<HelperState>, peer: XpcConnection, dict: XpcObject) {
@@ -197,13 +206,14 @@ fn handle_message(state: &Arc<HelperState>, peer: XpcConnection, dict: XpcObject
         }
     };
     log::debug!("request: {request:?}");
-    let response = handle_request(state.executor.as_ref(), request);
+    let response = handle_request(&state.executors, request);
     reply(peer, dict, &response);
 }
 
 fn get_data(dict: XpcObject, key: &std::ffi::CStr) -> Option<Vec<u8>> {
     let mut len: usize = 0;
-    let ptr = unsafe { xpc_sys::xpc_dictionary_get_data(dict, key.as_ptr(), &mut len as *mut usize) };
+    let ptr =
+        unsafe { xpc_sys::xpc_dictionary_get_data(dict, key.as_ptr(), &mut len as *mut usize) };
     if ptr.is_null() {
         return None;
     }
@@ -236,16 +246,27 @@ fn reply(peer: XpcConnection, original: XpcObject, response: &HelperResponse) {
 }
 
 /// Background driver for the (pure, unit-tested) [`FailOpen`] state machine:
-/// polls once a second and destroys the bridge if the grace window elapses
-/// with no authenticated connection.
+/// polls once a second and runs the full [`failopen::teardown`] sequence
+/// (scopes -> DHCP -> bridge) if the grace window elapses with no
+/// authenticated connection.
 fn spawn_failopen_driver(state: Arc<HelperState>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
-        let action = state.failopen.lock().expect("failopen mutex poisoned").poll(Instant::now());
-        if action == Action::Destroy {
-            log::warn!("fail-open: grace window elapsed with no authenticated connection — destroying bridge");
-            if let Err(e) = state.executor.destroy() {
-                log::error!("fail-open destroy failed: {e:#}");
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let action =
+                state.failopen.lock().expect("failopen mutex poisoned").poll(Instant::now());
+            if action == Action::Destroy {
+                log::warn!(
+                    "fail-open: grace window elapsed with no authenticated connection — \
+                 restoring stock networking (clear scopes, stop DHCP, destroy bridge)"
+                );
+                if let Err(e) = failopen::teardown(
+                    state.executors.pf.as_ref(),
+                    state.executors.dhcp.as_ref(),
+                    state.executors.bridge.as_ref(),
+                ) {
+                    log::error!("fail-open teardown failed: {e:#}");
+                }
             }
         }
     });

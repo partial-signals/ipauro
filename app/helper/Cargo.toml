@@ -14,3 +14,8 @@ anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 block2 = { workspace = true }
+# M1 data plane (R005-T4/T5/T6): DHCP responder socket (bound to the bridge
+# interface via IP_BOUND_IF) and the one raw FFI call socket2 doesn't wrap
+# (if_nametoindex, to resolve the bridge's interface index).
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"

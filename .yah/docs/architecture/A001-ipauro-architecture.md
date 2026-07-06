@@ -1,7 +1,7 @@
 <!--
 @yah:ticket(R002-T7, "IPC control facet v0: unix socket; snapshot-on-connect + ordered event stream + versioned commands; CLI reference client — UI client and external apps are the same surface")
 @yah:at(2026-07-02T18:34:11Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 @yah:gotcha("This is R003-F7's CONTROL facet pulled to P0 — with the brain now a service and the UI a thin client, the IPC API is the PRIMARY control surface from day one, not an extension afterthought. The service's desired-state store is the single source of truth; every client (our tray UI, a closed-source app, the CLI) is a commander/renderer kept in sync by snapshot+events. Design in from v0: protocol versioning, reconnect/resync, and the multi-client rule (N watchers; command arbitration TBD but the protocol must carry client identity). The stream facet (canonical streams, A004) stays later (R003-F7/R010).")
@@ -364,7 +364,7 @@
 <!--
 @yah:ticket(R002-T6, "Start-at-login: brain service registered via SMAppService; the checkbox lives in the UI client over IPC")
 @yah:at(2026-06-28T02:49:00Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 -->
@@ -372,7 +372,7 @@
 <!--
 @yah:ticket(R002-F5, "Fail-open on XPC disconnect: helper restores stock networking on service death (with restart grace)")
 @yah:at(2026-06-28T02:49:00Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 @yah:gotcha("Fail-open keys on the BRAIN SERVICE's XPC connection, never the UI client — UI quit/crash/upgrade must not touch the mesh (that's the point of the brain/face split). Add a short grace window so a service restart or upgrade doesn't needlessly tear down and rebuild the mesh mid-session; the grace still fails open if no reconnect arrives.")
@@ -381,7 +381,7 @@
 <!--
 @yah:ticket(R002-F4, "Helper bridge90 create/destroy over XPC; wire tray button")
 @yah:at(2026-06-28T02:49:00Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 -->
@@ -389,7 +389,7 @@
 <!--
 @yah:ticket(R002-T3, "XPC channel service<->helper: narrow, validated, caller-authenticated command API")
 @yah:at(2026-06-28T02:49:00Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 @yah:gotcha("'Validated' means AUTHENTICATE THE CALLER, not just the message schema: verify the connecting process's code signature via its audit token (SecCodeCopyGuestWithAttributes), require same team ID + a minimum version, reject everything else. An unauthenticated root-helper Mach service that rewrites pf and creates bridges is a classic macOS local-privilege-escalation shape (the Docker vmnetd CVE class). Version the XPC protocol from day one — app and helper upgrade on different schedules.")
@@ -398,7 +398,7 @@
 <!--
 @yah:ticket(R002-T2, "SMAppService root helper daemon: register + one-time install auth dialog")
 @yah:at(2026-06-28T02:49:00Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P0)
 @yah:parent(R002)
 @yah:gotcha("Developer ID signing must be stood up HERE (M0), not M5: SMAppService registration effectively requires a properly signed app bundle with the helper embedded (Contents/Library/LaunchDaemons plist + bundle-program requirements). R007-T5 at P5 is only the final notarization/distribution polish, not the first time code gets signed.")
@@ -407,6 +407,7 @@
 <!--
 @yah:ticket(R002-T1, "Scaffold Rust workspace: brain service (launchd-managed) + SMAppService helper + compact egui tray client")
 @yah:assignee(agent:fable-manager)
+@yah:status(done)
 @yah:at(2026-06-28T02:49:00Z)
 @yah:phase(P0)
 @yah:parent(R002)

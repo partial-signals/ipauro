@@ -1,27 +1,58 @@
-//! Bridge lifecycle behind a trait (ticket R002-F4), so request handling
-//! (`request.rs`) can be unit-tested against a mock instead of shelling out.
+//! Bridge lifecycle behind a trait (ticket R002-F4, extended for M1's
+//! R005-T4 member/address reconcile), so request handling (`request.rs`) can
+//! be unit-tested against a mock instead of shelling out.
 //!
 //! The real implementation shells out to `/sbin/ifconfig`. It is the ONLY
-//! place in this crate that constructs an `ifconfig` command line, and it is
-//! hardcoded to [`ipauro_proto::helper::BRIDGE_NAME`] — the request enum
-//! carries no interface name field (see `ipauro-proto`'s `helper` module
-//! docs), so by construction no other interface can ever reach an exec call
-//! here.
+//! place in this crate that constructs an `ifconfig` command line, and the
+//! bridge operations are hardcoded to [`ipauro_proto::helper::BRIDGE_NAME`]
+//! — the request enum carries no interface name field for bridge identity
+//! (see `ipauro-proto`'s `helper` module docs), so by construction no other
+//! bridge can ever be created/destroyed/addressed here. Member names DO
+//! travel over the wire (`SetBridgeMembers`); see `request.rs` for the
+//! validate-before-any-exec gate ahead of every call into this module.
 
-use anyhow::{bail, Context, Result};
-use ipauro_proto::helper::BRIDGE_NAME;
-use ipauro_proto::state::BridgeInfo;
+use std::net::Ipv4Addr;
 use std::process::Command;
 
-/// The three bridge operations the helper exposes over XPC. Real impl below;
+use anyhow::{Context, Result, bail};
+use ipauro_proto::helper::BRIDGE_NAME;
+use ipauro_proto::state::BridgeInfo;
+
+use crate::cmd::{self, IFCONFIG};
+use crate::netutil;
+
+/// The bridge operations the helper exposes over XPC. Real impl below;
 /// tests use a mock (see `request.rs`'s tests).
 pub trait BridgeExecutor: Send + Sync {
     fn create(&self) -> Result<()>;
     fn destroy(&self) -> Result<()>;
     fn status(&self) -> Result<Option<BridgeInfo>>;
-}
 
-const IFCONFIG: &str = "/sbin/ifconfig";
+    /// Every network interface name the system currently knows about
+    /// (`ifconfig -l`). Used to validate that a caller-supplied member/scope
+    /// name is real before any exec touches it (R002-T3: interface names are
+    /// the first attacker-aimable strings on this channel).
+    fn list_interfaces(&self) -> Result<Vec<String>>;
+
+    /// Reconcile the bridge's member set to exactly `members` (already name-
+    /// and existence-validated by the caller — see `request.rs`): add
+    /// missing, remove stale, then flush any IPv4 alias each member
+    /// self-assigned (A002 §4 — addresses live on the bridge, not the
+    /// member; a member keeping a stray alias produces a split-brain
+    /// subnet).
+    fn set_members(&self, members: &[String]) -> Result<()>;
+
+    /// Assign the bridge's IPv4 address (idempotent: a no-op if the bridge
+    /// already holds this exact address/prefix).
+    fn set_address(&self, ipv4: Ipv4Addr, prefix: u8) -> Result<()>;
+
+    /// The bridge's current address prefix, parsed from `ifconfig`'s
+    /// `netmask 0x........` token. Not carried by [`BridgeInfo`] today (see
+    /// this lane's final report for a proto change request) — needed
+    /// in-helper to validate a `ServeDhcp` pool falls inside the bridge's
+    /// actual subnet (R005-T6).
+    fn address_prefix(&self) -> Result<Option<u8>>;
+}
 
 /// Real `/sbin/ifconfig`-backed executor. Idempotent per ticket requirement:
 /// create-on-existing and destroy-on-missing are `Ok(())`, not errors.
@@ -62,19 +93,94 @@ impl BridgeExecutor for IfconfigExecutor {
             &String::from_utf8_lossy(&output.stderr),
         )
     }
+
+    fn list_interfaces(&self) -> Result<Vec<String>> {
+        cmd::list_interfaces()
+    }
+
+    fn set_members(&self, members: &[String]) -> Result<()> {
+        let have = self.status()?.map(|info| info.members).unwrap_or_default();
+        let (to_add, to_remove) = netutil::compute_membership_diff(members, &have);
+
+        for m in &to_add {
+            run(&[BRIDGE_NAME, "addm", m]).with_context(|| format!("adding member {m}"))?;
+            log::info!("added bridge member {m}");
+        }
+        for m in &to_remove {
+            run(&[BRIDGE_NAME, "deletem", m])
+                .with_context(|| format!("removing stale member {m}"))?;
+            log::info!("removed stale bridge member {m}");
+        }
+        // Flush stray IPv4 aliases on every DESIRED member (not just newly
+        // added ones) every pass — matches usb-link-bridge.sh's reconcile(),
+        // and is cheap/idempotent when there's nothing to flush.
+        for m in members {
+            self.flush_member_aliases(m);
+        }
+        Ok(())
+    }
+
+    fn set_address(&self, ipv4: Ipv4Addr, prefix: u8) -> Result<()> {
+        let current = self.status()?;
+        let current_ipv4 = current.as_ref().and_then(|info| info.ipv4.as_deref());
+        let current_prefix = self.address_prefix()?;
+        if current_ipv4 == Some(ipv4.to_string().as_str()) && current_prefix == Some(prefix) {
+            return Ok(()); // idempotent: already exactly this address/prefix
+        }
+        let netmask = netutil::prefix_to_netmask(prefix);
+        run(&[BRIDGE_NAME, "inet", &ipv4.to_string(), "netmask", &netmask.to_string()])?;
+        log::info!("set {BRIDGE_NAME} address -> {ipv4}/{prefix}");
+        Ok(())
+    }
+
+    fn address_prefix(&self) -> Result<Option<u8>> {
+        let output = Command::new(IFCONFIG)
+            .arg(BRIDGE_NAME)
+            .output()
+            .with_context(|| format!("spawning {IFCONFIG} {BRIDGE_NAME}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr_indicates_absent(&stderr) {
+                return Ok(None);
+            }
+            bail!("ifconfig {BRIDGE_NAME} failed: {}", stderr.trim());
+        }
+        Ok(parse_first_inet_netmask_prefix(&String::from_utf8_lossy(&output.stdout)))
+    }
+}
+
+impl IfconfigExecutor {
+    /// Query `member`'s own addresses and flush every one found — the
+    /// address belongs on the bridge (A002 §4). Best-effort: a member that
+    /// vanished mid-reconcile (replug race) or a flush that fails on an
+    /// already-gone alias logs and continues rather than failing the whole
+    /// `SetBridgeMembers` call over one stray alias.
+    fn flush_member_aliases(&self, member: &str) {
+        let output = match Command::new(IFCONFIG).arg(member).output() {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("could not spawn {IFCONFIG} {member} to flush aliases: {e:#}");
+                return;
+            }
+        };
+        if !output.status.success() {
+            log::warn!(
+                "could not query {member} to flush aliases: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return;
+        }
+        for addr in parse_inet_addresses(&String::from_utf8_lossy(&output.stdout)) {
+            log::info!("flushing member {member} addr {addr} (belongs on the bridge, A002 §4)");
+            if let Err(e) = run(&[member, "-alias", &addr]) {
+                log::warn!("flushing {member} alias {addr} failed: {e:#}");
+            }
+        }
+    }
 }
 
 fn run(args: &[&str]) -> Result<std::process::Output> {
-    log::debug!("+ {IFCONFIG} {}", args.join(" "));
-    let output = Command::new(IFCONFIG)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawning {IFCONFIG} {args:?}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{IFCONFIG} {args:?} failed: {}", stderr.trim());
-    }
-    Ok(output)
+    cmd::run_checked(IFCONFIG, args)
 }
 
 /// `ifconfig`'s stable error text when the interface doesn't exist (verified
@@ -88,7 +194,11 @@ fn stderr_indicates_absent(stderr: &str) -> bool {
 /// out from `status()` so it can be exercised with canned output — no process
 /// spawn, no root required — independent of whether `/sbin/ifconfig` is even
 /// present on the test machine.
-fn classify_ifconfig_output(success: bool, stdout: &str, stderr: &str) -> Result<Option<BridgeInfo>> {
+fn classify_ifconfig_output(
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<BridgeInfo>> {
     if !success {
         if stderr_indicates_absent(stderr) {
             return Ok(None);
@@ -98,26 +208,54 @@ fn classify_ifconfig_output(success: bool, stdout: &str, stderr: &str) -> Result
     Ok(Some(parse_bridge_status(stdout)))
 }
 
+/// Parse every IPv4 (`inet `) address out of an `ifconfig <ifc>` stdout blob
+/// — used both by [`parse_bridge_status`] (the bridge's own address) and by
+/// [`IfconfigExecutor::flush_member_aliases`] (a member can carry zero, one,
+/// or several stray IPv4 aliases it self-assigned before being bridged).
+/// Deliberately matches "inet " (trailing space) so "inet6" lines are
+/// excluded.
+fn parse_inet_addresses(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("inet "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Parse `ifconfig bridge90`'s stdout into a [`BridgeInfo`]. Only called once
 /// the caller already knows the bridge exists (nonzero exit is handled by
 /// [`classify_ifconfig_output`] before this is reached).
 fn parse_bridge_status(stdout: &str) -> BridgeInfo {
     let mut members = Vec::new();
-    let mut ipv4 = None;
     for line in stdout.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("member: ") {
             if let Some(name) = rest.split_whitespace().next() {
                 members.push(name.to_string());
             }
-        } else if let Some(rest) = line.strip_prefix("inet ") {
-            // deliberately NOT "inet6" — the space after "inet" excludes it
-            if let Some(addr) = rest.split_whitespace().next() {
-                ipv4 = Some(addr.to_string());
-            }
         }
     }
-    BridgeInfo { name: BRIDGE_NAME.to_string(), members, ipv4 }
+    let ipv4 = parse_inet_addresses(stdout).into_iter().next();
+    let prefix = parse_first_inet_netmask_prefix(stdout);
+    BridgeInfo { name: BRIDGE_NAME.to_string(), members, ipv4, prefix }
+}
+
+/// Parse the netmask off the FIRST `inet ` line of an `ifconfig <ifc>`
+/// stdout blob (e.g. `inet 10.69.0.1 netmask 0xffffff00 broadcast
+/// 10.69.0.255`) into a CIDR prefix length. `None` if there's no `inet`
+/// line, or its `netmask` token is missing/unparseable.
+fn parse_first_inet_netmask_prefix(stdout: &str) -> Option<u8> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("inet ") {
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            let mask_pos = tokens.iter().position(|t| *t == "netmask")?;
+            let hex = tokens.get(mask_pos + 1)?;
+            return netutil::netmask_hex_to_prefix(hex);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -173,9 +311,42 @@ bridge90: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 
     #[test]
     fn bridge_with_no_members_and_no_inet() {
-        let stdout = "bridge90: flags=8802<BROADCAST,SIMPLEX,MULTICAST> mtu 1500\n\tstatus: active\n";
+        let stdout =
+            "bridge90: flags=8802<BROADCAST,SIMPLEX,MULTICAST> mtu 1500\n\tstatus: active\n";
         let info = classify_ifconfig_output(true, stdout, "").unwrap().unwrap();
         assert!(info.members.is_empty());
         assert!(info.ipv4.is_none());
+    }
+
+    #[test]
+    fn parses_netmask_prefix_from_bridge_output() {
+        assert_eq!(parse_first_inet_netmask_prefix(BRIDGE_PRESENT_STDOUT), Some(24));
+    }
+
+    #[test]
+    fn no_inet_line_has_no_prefix() {
+        let stdout = "bridge90: flags=8802<BROADCAST> mtu 1500\n\tstatus: active\n";
+        assert_eq!(parse_first_inet_netmask_prefix(stdout), None);
+    }
+
+    #[test]
+    fn parses_multiple_stray_aliases_on_a_member() {
+        let stdout = "\
+en9: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
+\tinet6 fe80::1%en9 prefixlen 64 scopeid 0x9
+\tinet 169.254.84.1 netmask 0xffff0000 broadcast 169.254.255.255
+\tinet 10.0.0.5 netmask 0xffffff00 broadcast 10.0.0.255
+\tstatus: active
+";
+        assert_eq!(
+            parse_inet_addresses(stdout),
+            vec!["169.254.84.1".to_string(), "10.0.0.5".to_string()]
+        );
+    }
+
+    #[test]
+    fn member_with_no_aliases_parses_empty() {
+        let stdout = "en9: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n\tstatus: active\n";
+        assert!(parse_inet_addresses(stdout).is_empty());
     }
 }

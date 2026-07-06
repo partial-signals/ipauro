@@ -13,9 +13,11 @@
 //! **This crate is manager-owned.** Implementation agents must not edit it;
 //! request contract changes in your final report instead.
 //!
-//! Versioning: additive changes bump [`PROTOCOL_VERSION`]; the server rejects
-//! clients whose version it does not know. v0 favors debuggability (NDJSON you
-//! can drive with `nc`) over wire efficiency.
+//! Versioning: the server rejects clients whose [`PROTOCOL_VERSION`] it does
+//! not know. Additive changes (new commands, defaulted snapshot fields) do
+//! NOT bump the version — JSON tolerates unknown fields both ways; only
+//! breaking reshapes bump it. v0 favors debuggability (NDJSON you can drive
+//! with `nc`) over wire efficiency.
 //!
 //! Telemetry (metering) is deliberately NOT in the v0 control stream: per
 //! R002-T7's gotcha, high-rate meter frames will arrive post-v0 as a separate
@@ -25,6 +27,38 @@
 //! `@arch:see(.yah/docs/working/W001-ipauro-plan.md)`
 
 pub const PROTOCOL_VERSION: u32 = 0;
+// Version policy: additive changes (new commands, new optional snapshot
+// fields with #[serde(default)]) do NOT bump the version — JSON tolerates
+// unknown fields both ways. Only breaking reshapes bump it.
+
+/// Prototype-proven defaults for the M1 data plane (mirrors `prototype/`'s
+/// env defaults — the executable spec).
+pub mod defaults {
+    use std::net::Ipv4Addr;
+    pub const BRIDGE_IPV4: Ipv4Addr = Ipv4Addr::new(10, 69, 0, 1);
+    pub const BRIDGE_PREFIX: u8 = 24;
+    pub const DHCP_POOL_START: Ipv4Addr = Ipv4Addr::new(10, 69, 0, 10);
+    pub const DHCP_POOL_END: Ipv4Addr = Ipv4Addr::new(10, 69, 0, 200);
+}
+
+/// Seed of the M4 protocol registry (R004-F1): declarative protocol → ports
+/// data, so transport scoping is data-driven from day one, never a
+/// type-name match. M1 ships exactly one entry.
+pub mod registry {
+    pub struct ProtocolPorts {
+        pub name: &'static str,
+        pub udp_ports: &'static [u16],
+        pub multicast_v4: &'static [&'static str],
+        pub multicast_v6: &'static [&'static str],
+    }
+    /// Ableton Link (A002: udp/20808, 224.76.78.75, ff12::8080).
+    pub const LINK: ProtocolPorts = ProtocolPorts {
+        name: "ableton-link",
+        udp_ports: &[20808],
+        multicast_v4: &["224.76.78.75"],
+        multicast_v6: &["ff12::8080"],
+    };
+}
 
 /// Stable identifiers shared by packaging, the service, and the helper.
 pub mod ids {
@@ -52,6 +86,24 @@ pub mod state {
         pub service: ServiceInfo,
         pub helper: HelperState,
         pub bridge: BridgeState,
+        /// M1 data-plane state. `#[serde(default)]` so a new client tolerates
+        /// an old server's snapshots (additive-change policy).
+        #[serde(default)]
+        pub transport: TransportState,
+    }
+
+    /// Data-plane posture beyond bare bridge existence (M1, R005).
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+    pub struct TransportState {
+        /// Whether scoping was REQUESTED (SetTransportScope) — desired state,
+        /// so a reconnecting client can distinguish "never asked" from
+        /// "asked, not applied yet". `#[serde(default)]`: additive.
+        #[serde(default)]
+        pub link_scope_desired: bool,
+        /// Link's ports are pf-scoped to the bridge (prototype's pf-prefer).
+        pub link_scoped: bool,
+        /// The in-process DHCP responder is serving on the bridge.
+        pub dhcp_serving: bool,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -89,6 +141,9 @@ pub mod state {
         pub name: String,
         pub members: Vec<String>,
         pub ipv4: Option<String>,
+        /// CIDR prefix of `ipv4`, when known. `#[serde(default)]`: additive.
+        #[serde(default)]
+        pub prefix: Option<u8>,
     }
 }
 
@@ -154,6 +209,10 @@ pub mod ipc {
         /// invoked from the installed app bundle context).
         RegisterHelper,
         UnregisterHelper,
+        /// Pin Link's ports to the bridge via pf (block everywhere else) —
+        /// the prototype's pf-prefer behavior, driven from
+        /// `crate::registry::LINK`. The reconciler owns applying/clearing.
+        SetTransportScope { enabled: bool },
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -267,6 +326,46 @@ pub mod helper {
         Status,
         CreateBridge,
         DestroyBridge,
+        /// Reconcile the bridge's member set to exactly this list (add
+        /// missing, remove stale, flush any member-held IPv4s — addresses
+        /// live on the bridge, A002 §4). The helper MUST validate every name
+        /// (`^en[0-9]+$` and interface exists) before any exec — member names
+        /// are the first attacker-aimable strings on this channel.
+        /// `SetBridgeMembers` → `Ok` or `Bridge`.
+        SetBridgeMembers { members: Vec<String> },
+        /// Assign the bridge its IPv4 (idempotent). The helper MUST validate
+        /// RFC1918 and 8..=30 prefix. → `Ok` or `Bridge`.
+        SetBridgeAddress { ipv4: std::net::Ipv4Addr, prefix: u8 },
+        /// Scope a UDP port to the allowed interfaces via a dedicated pf
+        /// ANCHOR (allow there, block elsewhere, then selective state
+        /// invalidation so live flows re-evaluate — stateful-pf trap, A002).
+        /// Never whole-ruleset replace (R005-T5 gotcha). Iface names
+        /// validated like members. → `Ok`.
+        ScopeUdp { port: u16, allowed_ifaces: Vec<String> },
+        /// Remove every scope this helper installed (flush the anchor). → `Ok`.
+        ClearScopes,
+        /// Serve DHCP on the bridge from an in-process responder — NEVER
+        /// /etc/bootpd.plist (R005-T6 gotcha) — and NEVER emit a
+        /// router/gateway option (the audio segment must not become a
+        /// default route). Pool must lie in the bridge's subnet. → `Ok`.
+        ServeDhcp {
+            pool_start: std::net::Ipv4Addr,
+            pool_end: std::net::Ipv4Addr,
+            netmask: std::net::Ipv4Addr,
+        },
+        /// Stop the responder. → `Ok`.
+        StopDhcp,
+        /// Full data-plane report (bridge + scopes + DHCP). → `Report`.
+        Report,
+    }
+
+    /// Answer to [`HelperRequest::Report`].
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct DataPlaneReport {
+        pub bridge: Option<BridgeInfo>,
+        /// Ports currently scoped by our anchor, with their allow-lists.
+        pub scoped_ports: Vec<(u16, Vec<String>)>,
+        pub dhcp_serving: bool,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -275,6 +374,8 @@ pub mod helper {
         Pong { version: String },
         /// Current bridge state (None = no bridge exists).
         Bridge { info: Option<BridgeInfo> },
+        /// Full data-plane report (answers `Report`).
+        Report { report: DataPlaneReport },
         Ok,
         Err { message: String },
     }
@@ -300,8 +401,10 @@ mod tests {
                     name: helper::BRIDGE_NAME.into(),
                     members: vec!["en9".into(), "en12".into()],
                     ipv4: Some("10.69.0.1".into()),
+                    prefix: None,
                 }),
             },
+            transport: Default::default(),
         }
     }
 
@@ -356,6 +459,50 @@ mod tests {
             let back: ServerMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(&back, m);
         }
+    }
+
+    #[test]
+    fn m1_verbs_round_trip() {
+        use std::net::Ipv4Addr;
+        for req in [
+            helper::HelperRequest::SetBridgeMembers { members: vec!["en9".into(), "en12".into()] },
+            helper::HelperRequest::SetBridgeAddress { ipv4: crate::defaults::BRIDGE_IPV4, prefix: 24 },
+            helper::HelperRequest::ScopeUdp {
+                port: registry::LINK.udp_ports[0],
+                allowed_ifaces: vec![helper::BRIDGE_NAME.into()],
+            },
+            helper::HelperRequest::ClearScopes,
+            helper::HelperRequest::ServeDhcp {
+                pool_start: crate::defaults::DHCP_POOL_START,
+                pool_end: crate::defaults::DHCP_POOL_END,
+                netmask: Ipv4Addr::new(255, 255, 255, 0),
+            },
+            helper::HelperRequest::StopDhcp,
+            helper::HelperRequest::Report,
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert_eq!(serde_json::from_str::<helper::HelperRequest>(&json).unwrap(), req);
+        }
+        let resp = helper::HelperResponse::Report {
+            report: helper::DataPlaneReport {
+                bridge: None,
+                scoped_ports: vec![(20808, vec!["bridge90".into()])],
+                dhcp_serving: true,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(serde_json::from_str::<helper::HelperResponse>(&json).unwrap(), resp);
+    }
+
+    #[test]
+    fn old_snapshot_json_still_parses() {
+        // Additive-change policy: a snapshot serialized WITHOUT the M1
+        // `transport` field (an old server) must still parse via default.
+        let old = r#"{"service":{"version":"0.0.1","pid":1,"started_unix":0},
+            "helper":{"state":"not_registered"},
+            "bridge":{"desired_up":false,"actual":null}}"#;
+        let snap: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(snap.transport, TransportState::default());
     }
 
     #[test]

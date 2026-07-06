@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ipauro_core::discovery::MockUsbNcmSource;
 use ipauro_core::helper_channel::MockHelper;
 use ipauro_core::registrar::StubHelperRegistrar;
 use ipauro_core::ServiceConfig;
@@ -82,6 +83,7 @@ async fn spawn_service(socket_path: PathBuf) {
         socket_path: socket_path.clone(),
         helper: Arc::new(MockHelper::new()),
         registrar: Arc::new(StubHelperRegistrar),
+        usb_source: Arc::new(MockUsbNcmSource::default()),
     };
     tokio::spawn(async move {
         let _ = ipauro_core::serve(config, std::future::pending::<()>()).await;

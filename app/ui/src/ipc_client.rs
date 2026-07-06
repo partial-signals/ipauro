@@ -229,6 +229,7 @@ mod tests {
             service: ServiceInfo { version: "0.0.1".into(), pid: 1, started_unix: 0 },
             helper: HelperState::NotRegistered,
             bridge: BridgeState { desired_up: false, actual: None },
+            transport: Default::default(),
         }
     }
 
