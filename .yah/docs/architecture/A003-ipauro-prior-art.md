@@ -23,7 +23,7 @@
 @yah:status(open)
 @yah:phase(P6)
 @yah:parent(R010)
-@yah:gotcha("Model on roc-toolkit roc-vad (a macOS CoreAudio virtual device with a control interface) + BlackHole (MIT, the minimal loopback AudioServerPlugIn shell) + native CoreAudio AGGREGATE devices — don't write a CoreAudio driver from zero (A003 §3). Round-trip: IPAuRo -> streams (any format) -> mixing app -> EITHER back to IPAuRo -> hardware DAC OR the mixing app drives the DAC directly. We expose + transport + format-adapt; we never mix and we don't own the DAC routing decision.")
+@yah:gotcha("Model on roc-toolkit roc-vad (a macOS CoreAudio virtual device with a control interface) + BlackHole (GPL-3.0, with commercial licences sold separately; the minimal loopback AudioServerPlugIn shell, reusable outright in GPL IPAuRo, so the 'MIT' this line used to say was wrong; corrected 2026-10-12 per noisetable W255 §2.3) + native CoreAudio AGGREGATE devices — don't write a CoreAudio driver from zero (A003 §3). Round-trip: IPAuRo -> streams (any format) -> mixing app -> EITHER back to IPAuRo -> hardware DAC OR the mixing app drives the DAC directly. We expose + transport + format-adapt; we never mix and we don't own the DAC routing decision.")
 @yah:gotcha("GENERALIZE beyond mixing: this is IPAuRo as a public network-backed SOUNDCARD via TWO consumer paths — (a) apps that integrate open IPAuRo over IPC; (b) apps that never will (Zoom, Teams, any video chat) route through the virtual SYSTEM device: pick 'IPAuRo' in the device list and that app's sound enters/leaves the IP-audio space, BlackHole-like. Same job as Dante Virtual Soundcard but protocol-plural. Keep it a general public capability, NEVER app-specific (abstract-before-specific). Apps may depend on IPAuRo being installed (vmnetd/runtime model).")
 @yah:gotcha("Packaging + sequencing: this is an OS-SPECIFIC ipauro plugin (macOS: HAL AudioServerPlugIn installed to /Library/Audio/Plug-Ins/HAL by the privileged helper + coreaudiod kickstart; WASAPI/PipeWire siblings later) attached over the canonical-stream surface. First broker: TACTUS -> LinkAudio (system sound into the Link Audio space — tactus's first real consumer in IPAuRo; interop gate R005-F8). THIN-SLICE option: system<->LinkAudio alone needs no cross-protocol NAT — it could lead R010 as its first shippable slice (killer demo: Zoom audio onto a Link mesh over USB).")
 -->
@@ -96,7 +96,7 @@ tolerates the lossy links NetJack cannot.
   **SonoBus** is the reference for adaptive-buffer behavior.
 - **Mixing-app / DAC boundary + system-sound plugin:** **roc-toolkit `roc-vad`** is a macOS
   **CoreAudio Virtual Audio Device with a gRPC control interface** (add/remove/configure virtual
-  devices on the fly), and **BlackHole** (MIT) is the minimal loopback `AudioServerPlugIn` to model
+  devices on the fly), and **BlackHole** (GPL-3.0; commercial licences from Existential Audio for non-GPL apps) is the minimal loopback `AudioServerPlugIn` to model
   the device shell on. Together they are the mechanism for our boundary *and* for the
   **system-sound plugin** (R010-F6): present network streams as a CoreAudio device any app —
   DAW, Zoom, Teams — consumes, and take output back to hardware. Native **CoreAudio aggregate

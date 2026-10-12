@@ -77,6 +77,14 @@ A protocol is fully described as a point across these (mostly orthogonal) dimens
 The internal representation every adapter maps to/from. This *is* the registry's data schema and
 R010's interchange object:
 
+> **Spatial roles: proposal pending (2026-10-12).** noisetable W256 (`.yah/docs/working/W256-native-spatial-scene-format.md`
+> in the noisetable tree) proposes that `Object{pos,gain,t}` be *defined by* a shared MIT spatial scene schema,
+> working name `orrery`. Its contents: ADM-cartesian axes, noisetable's W246 *rank*, frame-stamped last-value
+> state with ramps, and sink-up capabilities. Its encodings: relay kind 9, an A118 in-cycle slot leg (noisetable→IPAuRo
+> mode 3), and flowpack on the network. ADM-OSC, ADM/BW64 and the W002 HDMI carriers become edge dialects. Until it
+> is ruled, treat the spatial fields below as a sketch. Note that noisetable's `@speaker` azimuth is positive-right,
+> while ADM's is positive-left, so no angle should cross this boundary unlabelled.
+
 ```
 CanonicalStream {
   identity:   { stream_id: Guid, name: Option<String>, origin_node: NodeId, origin_proto: ProtoId }

@@ -21,6 +21,11 @@
 //!   spherical trigonometry (the ADM-OSC test tool's own aed/xyz pairs
 //!   disagree with sin/cos). [`Aed::to_cartesian_spherical`] is the plain
 //!   spherical version, good for demos and labelled as such.
+//! - **noisetable** (`@speaker[az]`, `SpatialPositionWire::to_angular_degrees`):
+//!   the cartesian axes are the same, but its azimuth is **positive = right**
+//!   (`@speaker[-30] @speaker[30]` is a stereo pair). [`Aed`] follows ADM
+//!   (positive = left). The proposed shared format (noisetable W256) keeps
+//!   angles off the wire for exactly this reason.
 //! - **Dolby OAMD room coordinates** (ETSI TS 103 420): x 0..1 left→right,
 //!   y 0..1 **front→back**, z −1..1 (sign + magnitude; 0 = horizontal
 //!   plane). This comes from open implementations of the spec, not from
