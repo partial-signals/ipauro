@@ -32,6 +32,17 @@
 //! outside it needs to change, since it only ever calls the same
 //! `reconcile`-kick `Notify` that a 15s poll or a `PF_ROUTE` socket would.
 //!
+//! ## Only the HOST-side set is watched
+//!
+//! This polls [`UsbNcmSource::discover`] — host-side IOKit provenance, the
+//! bridge feed — and nothing else. R005-F7 added two more identification
+//! signals (device-side class, traffic delta), but neither can change bridge
+//! membership, so neither is a reason to kick a reconcile early. They refresh
+//! on `reconcile::run`'s own 15s backstop pass instead, which is well inside
+//! human cable-plugging time for a purely diagnostic readout. Polling
+//! `ifconfig`/`netstat` per interface every 2s to learn the same thing sooner
+//! would cost real process spawns for no data-plane effect.
+//!
 //! ## Where the 15s "poll backstop regardless" (A001) lives
 //!
 //! Not here — [`crate::reconcile::run`]'s own `POLL_INTERVAL` (15s) is that

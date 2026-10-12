@@ -95,7 +95,9 @@ pub fn run(state: &Arc<HelperState>) -> Result<()> {
 }
 
 fn on_listener_event(state: &Arc<HelperState>, event: XpcObject) {
-    match classify_event(event, true) {
+    // SAFETY: `event` came straight from libxpc's invocation of the listener's
+    // event handler, so it is a live xpc_object_t for the duration of the call.
+    match unsafe { classify_event(event, true) } {
         XpcEvent::NewConnection(peer) => accept_peer(state, peer),
         XpcEvent::ConnectionInvalid => {
             log::error!("listener's own mach-service connection went invalid");
@@ -157,7 +159,9 @@ fn on_peer_event(
     disconnected: &Arc<AtomicBool>,
     event: XpcObject,
 ) {
-    match classify_event(event, false) {
+    // SAFETY: `event` came straight from libxpc's invocation of this peer
+    // connection's event handler — live for the duration of the call.
+    match unsafe { classify_event(event, false) } {
         XpcEvent::Message(dict) => handle_message(state, peer.0, dict),
         XpcEvent::ConnectionInvalid | XpcEvent::ConnectionInterrupted => {
             mark_disconnected(state, disconnected);

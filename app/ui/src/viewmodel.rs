@@ -5,7 +5,7 @@
 
 use ipauro_proto::state::{BridgeState, HelperState, ServiceInfo, Snapshot, TransportState};
 
-use crate::state::StatusLine;
+use crate::state::{RebindWatch, StatusLine};
 
 /// Rows for the full Control-Center-style panel (`panel.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,19 @@ pub struct StatusLineViewModel {
     pub is_error: bool,
 }
 
+/// The latched rebind callout (`panel.rs`), pre-formatted. Present only
+/// while [`RebindWatch::pending`] is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebindViewModel {
+    /// What happened, in the operator's terms.
+    pub text: String,
+    /// What to do about it — the recovery A002 §4 prescribes, which is theirs
+    /// to perform.
+    pub action: String,
+    /// Label for the "I've done that" button that clears the latch.
+    pub dismiss_label: String,
+}
+
 /// Rows for the compact always-on-top widget (`widget.rs`): a status dot +
 /// member count + a tiny link-scope dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +68,11 @@ pub struct CompactViewModel {
     /// Whether Link's ports are actually pf-scoped right now (actual state,
     /// not desired — this is a glance-only display, no toggle here).
     pub link_scoped: bool,
+    /// A bridge rebuild is outstanding and unacknowledged. The compact widget
+    /// is the always-on-top mode an operator actually leaves open, so the
+    /// callout has to reach here too or it's invisible exactly when they're
+    /// mid-session.
+    pub rebind_pending: bool,
 }
 
 pub fn panel_view_model(snapshot: &Snapshot, now_unix: u64) -> PanelViewModel {
@@ -92,11 +110,30 @@ pub fn status_line_view_model(status: &StatusLine) -> Option<StatusLineViewModel
     }
 }
 
-pub fn compact_view_model(snapshot: &Snapshot) -> CompactViewModel {
+/// [`RebindWatch`] → [`RebindViewModel`], or `None` when no rebind is
+/// outstanding. Reads only the watch — never the current snapshot — so the
+/// wording can't drift as the bridge changes underneath a notice that is
+/// about a *past* rebuild.
+///
+/// The generation is named for the same reason `ipauro-cli` prints it: an
+/// operator chasing a dropout needs something to correlate against `ipauro
+/// status`'s `gen` row and the service log.
+pub fn rebind_view_model(rebind: &RebindWatch) -> Option<RebindViewModel> {
+    let epoch = rebind.pending()?;
+    Some(RebindViewModel {
+        text: format!("Bridge was rebuilt (generation {epoch})"),
+        action: "Restart your audio app to rejoin — its sockets are on the old interface."
+            .to_string(),
+        dismiss_label: "Dismiss".to_string(),
+    })
+}
+
+pub fn compact_view_model(snapshot: &Snapshot, rebind: &RebindWatch) -> CompactViewModel {
     CompactViewModel {
         bridge_up: snapshot.bridge.actual.is_some(),
         member_count: snapshot.bridge.actual.as_ref().map_or(0, |info| info.members.len()),
         link_scoped: snapshot.transport.link_scoped,
+        rebind_pending: rebind.pending().is_some(),
     }
 }
 
@@ -210,7 +247,29 @@ fn dhcp_line(transport: &TransportState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{reduce_rebind, ConnEvent};
     use ipauro_proto::state::BridgeInfo;
+
+    /// A `RebindWatch` with a rebind outstanding — built by folding real
+    /// snapshots through the real reducer rather than by hand, so these
+    /// rendering tests can't drift from `state.rs`'s latching rule.
+    fn watch_with_pending_rebind(epoch: u64) -> RebindWatch {
+        let up = |epoch| {
+            let mut snap = snapshot_with(
+                HelperState::NotRegistered,
+                BridgeState { desired_up: true, actual: None, epoch },
+            );
+            snap.bridge.actual = Some(BridgeInfo {
+                name: "bridge90".into(),
+                members: vec!["en9".into()],
+                ipv4: Some("10.69.0.1".into()),
+                prefix: None,
+            });
+            ConnEvent::Snapshot(snap)
+        };
+        let watch = reduce_rebind(&RebindWatch::default(), &up(epoch.saturating_sub(1)));
+        reduce_rebind(&watch, &up(epoch))
+    }
 
     fn snapshot_with(helper: HelperState, bridge: BridgeState) -> Snapshot {
         Snapshot {
@@ -225,7 +284,7 @@ mod tests {
         Snapshot {
             service: ServiceInfo { version: "1.2.3".into(), pid: 99, started_unix: 1_000 },
             helper: HelperState::NotRegistered,
-            bridge: BridgeState { desired_up: false, actual: None },
+            bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
             transport,
         }
     }
@@ -265,7 +324,7 @@ mod tests {
     fn panel_view_model_with_no_bridge() {
         let snapshot = snapshot_with(
             HelperState::NotRegistered,
-            BridgeState { desired_up: false, actual: None },
+            BridgeState { desired_up: false, actual: None, epoch: 0 },
         );
         let vm = panel_view_model(&snapshot, 1_000);
         assert_eq!(vm.bridge_name_line, "No bridge");
@@ -289,6 +348,7 @@ mod tests {
                     ipv4: Some("10.69.0.1".into()),
                     prefix: None,
                 }),
+                epoch: 1,
             },
         );
         let vm = panel_view_model(&snapshot, 1_000);
@@ -364,6 +424,7 @@ mod tests {
             BridgeState {
                 desired_up: true,
                 actual: Some(BridgeInfo { name: "bridge90".into(), members: vec![], ipv4: None, prefix: None }),
+                epoch: 0,
             },
         );
         let vm = panel_view_model(&snapshot, 1_000);
@@ -383,20 +444,22 @@ mod tests {
                     ipv4: None,
                     prefix: None,
                 }),
+                epoch: 1,
             },
         );
-        let vm = compact_view_model(&snapshot);
+        let vm = compact_view_model(&snapshot, &RebindWatch::default());
         assert!(vm.bridge_up);
         assert_eq!(vm.member_count, 3);
+        assert!(!vm.rebind_pending);
     }
 
     #[test]
     fn compact_view_model_with_no_bridge() {
         let snapshot = snapshot_with(
             HelperState::NotRegistered,
-            BridgeState { desired_up: false, actual: None },
+            BridgeState { desired_up: false, actual: None, epoch: 0 },
         );
-        let vm = compact_view_model(&snapshot);
+        let vm = compact_view_model(&snapshot, &RebindWatch::default());
         assert!(!vm.bridge_up);
         assert_eq!(vm.member_count, 0);
     }
@@ -465,7 +528,7 @@ mod tests {
             link_scoped: true,
             dhcp_serving: false,
         });
-        let vm = compact_view_model(&snapshot);
+        let vm = compact_view_model(&snapshot, &RebindWatch::default());
         assert!(vm.link_scoped);
 
         let snapshot = snapshot_with_transport(TransportState {
@@ -473,8 +536,41 @@ mod tests {
             link_scoped: false,
             dhcp_serving: false,
         });
-        let vm = compact_view_model(&snapshot);
+        let vm = compact_view_model(&snapshot, &RebindWatch::default());
         // Compact widget shows actual, not desired — pending scope isn't "on" yet.
         assert!(!vm.link_scoped);
+    }
+
+    #[test]
+    fn no_rebind_view_model_when_nothing_is_outstanding() {
+        assert_eq!(rebind_view_model(&RebindWatch::default()), None);
+    }
+
+    #[test]
+    fn rebind_view_model_names_the_generation_and_the_recovery() {
+        let vm = rebind_view_model(&watch_with_pending_rebind(4))
+            .expect("a latched rebind must render");
+        // The generation is the operator's correlation handle against
+        // `ipauro status`'s `gen` row.
+        assert!(vm.text.contains('4'), "{:?} omits the generation", vm.text);
+        assert!(vm.text.contains("rebuilt"), "{:?} doesn't say what happened", vm.text);
+        // A002 §4's recovery is theirs to perform, so it has to be spelled out.
+        assert!(vm.action.contains("Restart"), "{:?} omits the recovery", vm.action);
+        assert!(!vm.dismiss_label.is_empty());
+    }
+
+    #[test]
+    fn rebind_view_model_clears_once_acknowledged() {
+        let mut watch = watch_with_pending_rebind(2);
+        assert!(rebind_view_model(&watch).is_some());
+        watch.acknowledge();
+        assert_eq!(rebind_view_model(&watch), None);
+    }
+
+    #[test]
+    fn compact_view_model_carries_the_rebind_flag() {
+        let snapshot = snapshot_with_transport(TransportState::default());
+        let vm = compact_view_model(&snapshot, &watch_with_pending_rebind(3));
+        assert!(vm.rebind_pending);
     }
 }

@@ -21,6 +21,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 SKIP_SIGN="${SKIP_SIGN:-0}"
 
 echo "==> IPAuRo packaging: profile=${IPAURO_PROFILE} team_id=${IPAURO_TEAM_ID} skip_sign=${SKIP_SIGN}"
+echo "==> Build id: ${IPAURO_BUILD_ID} (stamped into ipauro-core + ipauro-helper; see common.sh)"
 
 # --- 0. Guard against identifier drift from the manager-owned ids module ---
 assert_id_in_proto_source "${BUNDLE_ID}"
@@ -189,12 +190,43 @@ else
   # signing would reach on its own), THEN the bundle. Deliberately not using
   # --deep on the bundle step — inside-out + explicit is the Apple-recommended
   # shape and --deep can silently paper over an unsigned nested binary.
+  # Each embedded executable gets an EXPLICIT --identifier (see
+  # codesign_identifier_for in lib/common.sh): macOS keys the Local Network
+  # multicast grant on the signing identifier, so leaving it to default to the
+  # bare filename would attach the grant to an accidental identity (R002-T8).
   for bin in ipauro-helper ipauro-core ipauro ipauro-ui; do
-    codesign --force --options runtime --timestamp \
-      --sign "${IDENTITY}" "${APP_PATH}/Contents/MacOS/${bin}"
+    bin_id="$(codesign_identifier_for "${bin}")"
+    if [[ -n "${bin_id}" ]]; then
+      echo "    ${bin} --identifier ${bin_id}"
+      codesign --force --options runtime --timestamp \
+        --identifier "${bin_id}" --sign "${IDENTITY}" "${APP_PATH}/Contents/MacOS/${bin}"
+    else
+      codesign --force --options runtime --timestamp \
+        --sign "${IDENTITY}" "${APP_PATH}/Contents/MacOS/${bin}"
+    fi
   done
   codesign --force --options runtime --timestamp \
     --sign "${IDENTITY}" "${APP_PATH}"
+
+  # Assert the identifiers actually landed. A silent drift here is invisible
+  # until a user's Local Network grant attaches to the wrong name.
+  echo "==> Verifying embedded code-signing identifiers"
+  for bin in ipauro-helper ipauro-core ipauro; do
+    want="$(codesign_identifier_for "${bin}")"
+    got="$(codesign -dvv "${APP_PATH}/Contents/MacOS/${bin}" 2>&1 \
+      | sed -n 's/^Identifier=//p')"
+    if [[ "${got}" != "${want}" ]]; then
+      echo "error: ${bin} signed as '${got}', expected '${want}'" >&2
+      exit 1
+    fi
+    echo "    ok  ${bin} = ${got}"
+  done
+  ui_id="$(codesign -dvv "${APP_PATH}/Contents/MacOS/ipauro-ui" 2>&1 | sed -n 's/^Identifier=//p')"
+  if [[ "${ui_id}" != "${BUNDLE_ID}" ]]; then
+    echo "error: ipauro-ui signed as '${ui_id}', expected the bundle id '${BUNDLE_ID}'" >&2
+    exit 1
+  fi
+  echo "    ok  ipauro-ui = ${ui_id}"
 
   echo "==> Signature summary"
   codesign -dvv "${APP_PATH}" 2>&1 | sed 's/^/    /'

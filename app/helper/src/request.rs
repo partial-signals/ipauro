@@ -32,9 +32,10 @@ pub struct Executors {
 /// (closed, narrow — see `ipauro-proto`) request enum is handled explicitly.
 pub fn handle_request(executors: &Executors, request: HelperRequest) -> HelperResponse {
     match &request {
-        HelperRequest::Ping => {
-            HelperResponse::Pong { version: env!("CARGO_PKG_VERSION").to_string() }
-        }
+        // Build identity, not just the package version — see
+        // `crate::build_version`: the core compares this against its own copy
+        // to notice a stale resident helper that survived a bundle swap.
+        HelperRequest::Ping => HelperResponse::Pong { version: crate::build_version() },
         HelperRequest::Status => bridge_status_response(executors),
         HelperRequest::CreateBridge => result_to_ok(executors.bridge.create()),
         HelperRequest::DestroyBridge => result_to_ok(executors.bridge.destroy()),
@@ -323,7 +324,7 @@ mod tests {
     fn ping_reports_version_without_touching_any_executor() {
         let (bridge, pf, dhcp, executors) = mocks();
         let resp = handle_request(&executors, HelperRequest::Ping);
-        assert_eq!(resp, HelperResponse::Pong { version: env!("CARGO_PKG_VERSION").to_string() });
+        assert_eq!(resp, HelperResponse::Pong { version: crate::build_version() });
         assert!(bridge.calls.lock().unwrap().is_empty());
         assert!(pf.calls.lock().unwrap().is_empty());
         assert!(dhcp.calls.lock().unwrap().is_empty());

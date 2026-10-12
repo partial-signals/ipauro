@@ -63,7 +63,10 @@ impl XpcHelper {
         // A handler must be installed before resume. Replies flow through
         // send_message_with_reply_sync, so this only ever observes errors.
         let handler = block2::RcBlock::new(move |event: XpcObject| {
-            match classify_event(event, false) {
+            // SAFETY: `event` came straight from libxpc's invocation of this
+            // connection's event handler — live for the duration of the call.
+            let classified = unsafe { classify_event(event, false) };
+            match classified {
                 XpcEvent::ConnectionInterrupted => {
                     log::warn!("helper connection interrupted (helper restarted?)");
                 }
@@ -77,7 +80,7 @@ impl XpcHelper {
                 | XpcEvent::Unknown => {
                     // Nothing actionable outside a request in flight; requests
                     // observe their own errors via the sync reply.
-                    log::debug!("helper connection event: {:?}", classify_event(event, false));
+                    log::debug!("helper connection event: {classified:?}");
                 }
             }
         });
@@ -109,7 +112,10 @@ impl XpcHelper {
             reply
         };
 
-        match classify_event(reply, false) {
+        // SAFETY: `reply` is the object just returned by
+        // xpc_connection_send_message_with_reply_sync — owned by us and not
+        // yet released (an error singleton is an immortal global).
+        match unsafe { classify_event(reply, false) } {
             XpcEvent::Message(dict) => {
                 let mut len: usize = 0;
                 let data =

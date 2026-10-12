@@ -32,9 +32,12 @@
 //!
 //! ## Status
 //!
-//! Design skeleton: type design and the three non-obvious algorithms (routing,
-//! election, epoch/objective) are fleshed out; transport/gossip are traits for
-//! the tactus and iroh adapters to implement. Not wired to a real build.
+//! Design skeleton: type design and the non-obvious algorithms (routing,
+//! election, epoch/objective, gossip dedup) are fleshed out; transport/gossip
+//! dissemination are traits for the tactus and iroh adapters to implement. Not
+//! wired into the running product yet, but the algorithms are hardware-free and
+//! run in the control-plane CI container (`scripts/ci-control-plane.sh`, R009-T1)
+//! — so they are regression-checked before they have a first caller.
 
 #[cfg(test)]
 mod tests;
@@ -86,6 +89,21 @@ impl MeshNode {
         self.me
     }
 
+    /// Read-only view of the gossiped graph — membership, incident links, and
+    /// per-peer facts. This is what a status surface renders and what a test
+    /// compares across nodes to show two views have converged.
+    pub fn topology(&self) -> &Topology {
+        &self.topology
+    }
+
+    /// Which objective is currently in force. The one strongly-ordered datum in
+    /// the mesh (§8.3): two nodes on the same epoch are optimizing against
+    /// identical weights, which is the precondition for their independently
+    /// computed routes to agree.
+    pub fn policy_epoch(&self) -> policy::PolicyEpoch {
+        self.policy.epoch
+    }
+
     /// Register a live transport to a peer (a Link multicast interface, an iroh
     /// connection whose direct path is up, a Thunderbolt bridge, …).
     pub fn add_gateway(&mut self, gw: Box<dyn Gateway>) {
@@ -108,7 +126,16 @@ impl MeshNode {
     /// Fold a received gossip record into the local view. Membership, link
     /// quality, capabilities, and policy-epoch updates all arrive this way.
     /// Returns whether the local view changed (a change may warrant a re-plan).
+    ///
+    /// Stale records are rejected *before* the policy is inspected. Ordering
+    /// matters: `PolicyEpoch` has its own monotonic ordering, but that only
+    /// guards against an older *epoch*, not against a replayed record that
+    /// carries a current one — and observing a policy off a record whose link
+    /// state we are about to discard would adopt half of it.
     pub fn apply_gossip(&mut self, record: gossip::Record) -> bool {
+        if !self.topology.accepts(&record) {
+            return false;
+        }
         self.policy.observe_epoch(&record);
         self.topology.apply(record)
     }

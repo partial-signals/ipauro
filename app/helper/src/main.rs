@@ -35,6 +35,29 @@ use listener::HelperState;
 use pf::PfctlExecutor;
 use request::Executors;
 
+/// This build's full version identity — the workspace package version plus
+/// the packaging build id, when `packaging/build-app.sh` stamped one in.
+/// Reported verbatim in [`ipauro_proto::helper::HelperResponse::Pong`].
+///
+/// **Why the build id exists.** launchd keeps an already-running helper
+/// process alive across a bundle replacement, so a freshly-installed core can
+/// find itself driving the PREVIOUS build (observed in M1 field verification:
+/// an M0 helper rejecting M1 verbs). The core detects that by comparing this
+/// string against the same string computed in its own process
+/// (`ipauro_core::build_version`) and cycles the helper's registration on a
+/// mismatch. The package version alone cannot carry that signal — it is
+/// `0.0.1` for every build of every milestone — hence the build id.
+///
+/// Deliberately duplicated in `ipauro-core` instead of shared: the natural
+/// home is `ipauro-proto`, which is manager-owned (flagged in R005-T10's
+/// report). The two copies MUST produce byte-identical output for one build.
+pub(crate) fn build_version() -> String {
+    match option_env!("IPAURO_BUILD_ID") {
+        Some(build) => format!("{}+{build}", env!("CARGO_PKG_VERSION")),
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -57,7 +80,7 @@ fn main() -> anyhow::Result<()> {
 
     log::info!(
         "ipauro-helper {} (mach service {}) ready",
-        env!("CARGO_PKG_VERSION"),
+        build_version(),
         ipauro_proto::ids::HELPER_LABEL
     );
 

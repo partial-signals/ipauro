@@ -17,11 +17,26 @@
 
 <!--
 @yah:ticket(R009-T1, "Control-plane CI in containers: discovery parsing, NodeId->address, pf/rule generation, gossip dedup/partition-heal, spanning-tree — no hardware")
-@yah:at(2026-06-28T03:09:36Z)
-@yah:status(open)
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-07-26T22:10:13Z)
 @yah:phase(P1)
 @yah:parent(R009)
-@yah:gotcha("Lands ALONGSIDE M1, not after M5 — the rule-generator and reconciler ports (R005) should grow their CI the day they're written, per the capabilities-merge-with-a-test rule.")
+@yah:handoff("Built scripts/ci-control-plane.sh + .github/workflows/ci.yml (3 jobs). Container job runs the 5 hardware-free crates (proto, core, cli, mesh, probe) in a pinned rust:1.97.0-bookworm: ~180 tests, verified green end-to-end locally via docker. macOS job runs the full workspace (~350 tests, 1 hardware test #[ignore]d), also verified green locally.")
+@yah:handoff("Anti-drift is the design point, in BOTH directions. The script derives workspace members from Cargo.toml (never hardcoded) and HARD-FAILS if any member is unclassified - verified by constructing a synthetic 9th member. The converse, --verify-exclusions, proves each macOS-only crate still genuinely fails to build on Linux, so an exclusion cannot rot into a silently-untested crate.")
+@yah:handoff("DISCOVERED + FIXED, inside the ticket's named test areas: gossip dedup did not exist. gossip.rs documented Record.seq as 'a receiver keeps only the newest' but topology.rs folded every record unconditionally - duplicate flood arrivals re-folded, and reordered stragglers rolled the view BACKWARD. Added a per-author seq watermark plus Topology::accepts() (kept separate from apply() so a dissemination layer can decline to re-flood without paying to fold), and reordered MeshNode::apply_gossip to reject stale records BEFORE observe_epoch: PolicyEpoch ordering rejects an older epoch but cannot detect a replay carrying a current one, so that path half-adopted a record it then discarded. 5 new tests; all 5 verified to FAIL with the guards reverted, so they are not vacuous.")
+@yah:handoff("Also added MeshNode::topology() and ::policy_epoch() read accessors (R003-T5 membership/status surfacing will want exactly these) and corrected ipauro-mesh's now-false 'Not wired to a real build' status line. Docs updated: W001 section 9 and README gained a test-tier table.")
+@yah:verify("./scripts/ci-control-plane.sh - container suite green")
+@yah:verify("./scripts/ci-control-plane.sh --verify-exclusions - all 3 exclusions still hold")
+@yah:verify("./scripts/ci-control-plane.sh --list - prints the classification")
+@yah:verify("cargo test --locked --workspace on macOS - full suite green (this is what the macos CI job runs)")
+@yah:verify("shellcheck scripts/ci-control-plane.sh - clean")
+@yah:gotcha("Lands ALONGSIDE M1, not after M5 - the rule-generator and reconciler ports (R005) should grow their CI the day they're written, per the capabilities-merge-with-a-test rule.")
+@yah:gotcha("Two of the five named areas have no tests because they have no CODE yet: NodeId->address (R003-T3) and spanning-tree (R006-F1). CI is deliberately crate-scoped, not test-name-scoped, so both are picked up the day they land - no CI change is needed for them.")
+@yah:gotcha("pf/rule generation is NOT container-testable and never will be. It lives in app/helper, which pulls ipauro-xpc -> block2 -> objc2 and cannot compile off Apple platforms - and W002 classifies pf/ifconfig/bootpd as 'not portable, and not worth making so' (the Linux agent, R011-F2, emits nftables from its own executor). That coverage therefore lives permanently on the macOS job. Do NOT file a ticket to lift pf into a portable crate; it contradicts canon.")
+@yah:gotcha("Deliberately did NOT touch app/helper or ipauro-core/reconcile.rs - @Ashguard:eclipse (session:bc63097e) is live on R005 and owns those files. Making app/helper Linux-buildable was considered and rejected on both grounds: a peer's blast radius, and W002 saying it is pointless.")
+@yah:gotcha("The container run writes to target/ci-linux and target/ci-cargo-home, never target/debug - sharing a target dir with the host macOS build would thrash fingerprints and contend for one cargo lock on this shared tree.")
+@yah:gotcha("cargo fmt is a non-gating warning step on purpose: locally this repo inherits a .rustfmt.toml from the parent noisetable checkout (unstable options, a spill-specific ignore list) but would not in a standalone GH checkout, so gating on it would behave differently in the two places.")
 -->
 
 # IPAuRo Findings — USB Mac-to-Mac Bridging for Ableton Link
@@ -251,6 +266,105 @@ the same binary from Corp's GUI Terminal → it immediately reached `peers 2` an
 EDR regardless — but also don't scapegoat it. Real corporate machines CAN do local USB Link
 sessions once the OS permission is granted.)
 
+### Local Network gate — execution-context matrix, measured (R002-T8, 2026-07-25)
+
+The section above established *that* the gate exists and that SSH loses to it. **R002-T8 measured
+which execution contexts actually hold the grant**, because the 2026-07-02 brain/face split moved
+the brain out of the tray app and into a launchd job — reopening the question of whether a launchd
+agent can hold what a GUI app could. Instrument: `crates/ipauro-probe` (see its `RUNBOOK.md`).
+Host: single Mac, **macOS 26.5.1 (25F80)**, Apple silicon, `en0` on a normal home LAN.
+
+**Method upgrade — two observation points, not one.** The original A002 method ("BPF sees the
+packet, the app doesn't") was run by eye across two terminals. `ipauro-probe check` now runs both
+legs itself, against the same beacons, on Link's own group/port (`224.76.78.75:20808`): the
+process's own socket, and a `/dev/bpf` tap on the egress interface. This matters because a
+socket-only probe **cannot falsify its own "gate open" result** — in-kernel multicast loopback can
+satisfy the socket leg while nothing leaves the machine. Verified concretely: with the tap pointed
+at an off-path interface the same run reports `LOOPBACK ONLY`, which is exactly the false positive
+a one-legged probe would have called success.
+
+- **XNU routes the multicast loopback copy via `lo0`, not the egress interface.** Measured: a run
+  beaconing out `en0` shows 9 beacons on an `en0` tap *and* 9 on an `lo0` tap. They are different
+  copies, so a nonzero count on the egress interface is genuine transmission, not the loopback
+  copy being double-counted. This is what licenses `check`'s "wire-confirmed" wording.
+
+**The authoritative registry.** macOS records its local-network posture per code identity in
+`/Library/Preferences/com.apple.networkextension.plist` — world-readable, an `NSKeyedArchiver`
+archive, with `MulticastPreferenceSet` (a decision exists) and `DenyMulticast` (the decision) per
+app. `ipauro-probe grants` reads it. This is the missing half of the diagnostic: behaviour alone
+cannot distinguish "this context holds the grant" from "someone approved this months ago", and a
+denial persists silently with no prompt ever shown again.
+
+- **`unset` is not `denied`.** On this host **236 of 263** records have no explicit decision, and
+  their traffic flows normally (VLC, Zoom, Telegram are all `unset`). Absence of a decision means
+  the system has not been told otherwise — the default is allow. Any consumer of this registry
+  (R007-F1) must treat `unset` and `DENIED` as different states, not fold them together.
+
+**Identity attribution — who the grant actually attaches to.** Three shapes, measured:
+
+| Launch shape | Registry identity |
+|---|---|
+| Binary run from a shell | **none of its own** — attributed to the responsible app (our shell runs went to `dev.yah`; `target/release/ipauro-probe` never got an entry) |
+| Bare executable as a launchd job | its own **code-signing identifier + path** (`ipauro-probe-agent-devid` → `/private/tmp/...`) |
+| Executable inside a bundle, launchd job with `AssociatedBundleIdentifiers` | the **associated bundle id**, no path (`io.ipauro.probetest`) |
+
+The first row invalidates a whole class of test: **running the probe from Terminal or over SSH
+measures Terminal's or `sshd`'s grant, not the binary's.** Those are rows about the parent app.
+Only launchd jobs have an independent identity, which is precisely why the brain service's
+placement had to be measured as a launchd job rather than inferred from a shell run.
+
+**The matrix.** Every row is `ipauro-probe check --seconds 8 --iface en0`, wire-confirmed:
+
+| Execution context | Signing | Prompt? | Registry | `check` | Verdict |
+|---|---|---|---|---|---|
+| Non-interactive shell (agent) | ad-hoc | none | inherits `dev.yah` (allowed) | `0` | GATE OPEN |
+| User LaunchAgent, `gui/501` | ad-hoc, **never-seen path** | none | auto-recorded **allowed** | `0` | GATE OPEN |
+| User LaunchAgent, `gui/501` | **Developer ID** (7BW4R8G8Q6) | none | auto-recorded **allowed** | `0` | GATE OPEN |
+| User LaunchAgent, `gui/501`, binary inside a signed **app bundle**, `AssociatedBundleIdentifiers` | Developer ID | none | bundle id, `unset` | `0` | GATE OPEN |
+| Root LaunchDaemon | — | **not run** (needs an operator password) | — | — | see RUNBOOK |
+| Over SSH | — | **not re-run** — established denied on macOS 15 above | — | — | see RUNBOOK |
+
+**Result: the feared failure mode did not occur.** R002-T8's premise was that "a user agent may be
+denied WITHOUT ever showing a prompt." On macOS 26.5.1 a **brand-new, never-before-seen,
+ad-hoc-signed LaunchAgent** got full bidirectional multicast on a real interface, wire-confirmed,
+with no prompt — and the system recorded an *allow* for it unprompted. Developer ID signing and
+bundle embedding changed the recorded identity but not the outcome.
+
+**Honest limits of this run — read before relying on it:**
+
+- **No denial was observed anywhere.** 0 of 263 records on this host are denied, so this run
+  demonstrates the auto-grant path and does *not* demonstrate that the instrument detects a real
+  denial on macOS 26. The negative case still rests on the macOS 15 SSH observation above. The
+  wire leg's ability to report a true zero *is* independently shown (off-path tap → `0`).
+- **Single host, single OS version.** The A002-era denial was on macOS 15.7.3; this is 26.5.1.
+  Behaviour may have relaxed between them — do not retro-fit this result onto macOS 15 machines.
+- **A managed/corporate Mac may behave differently** (MDM can preset these decisions). Re-run the
+  matrix there before assuming.
+- The rows above are a *user session that is already logged in*. Boot-before-login and
+  fast-user-switch behaviour are untested.
+
+**Placement decision (this is what R002-T8 was for):** the brain service **stays where it is** — an
+unprivileged user LaunchAgent (`io.ipauro.core`) inside the signed app bundle, registered via
+`SMAppService`, with `AssociatedBundleIdentifiers` → `io.ipauro.app`. No multicast-touching work
+needs to be delegated to the UI client or to the root helper, and the fallback sketched in W001 §4
+(delegate the gossip beacon / forwarder to a granted context) is **not needed** and should not be
+built. `io.ipauro.app` already carries a registry entry in the `unset` (i.e. permitted) state.
+
+**Consequence that had to be fixed, not just noted:** the grant attaches to the *code-signing
+identifier*, and `codesign` derives that from the filename when not told otherwise — so
+`ipauro-core` was signing as the bare, unnamespaced identifier `ipauro-core`. That is the name the
+grant binds to and the name System Settings shows the user. `packaging/build-app.sh` now signs each
+embedded executable with an explicit `--identifier` matching its launchd label
+(`io.ipauro.core`, `io.ipauro.helper`, `io.ipauro.app.cli`), and asserts it landed. Safe with
+respect to XPC caller authentication, which pins the **team ID** only
+(`ipauro_proto::helper::peer_requirement`), never a signing identifier.
+
+**First real confirmation is still owed at M2.** `ipauro-core` has not yet sent a multicast packet
+(that arrives with R003-F9's air-gapped bootstrap beacon), so its registry entry is `unset` by
+never having been exercised rather than by having been exercised and permitted. When R003-F9 lands,
+re-run `ipauro-probe grants --filter ipauro` and confirm the decision records against
+`io.ipauro.app` / `io.ipauro.core` — that is the last mile of this ticket, and it is cheap.
+
 ### pf transport-scoping works — but pf is STATEFUL (critical gotcha)
 
 - **Confirmed live:** `pf` can force an interface-unaware app (Ableton Link) onto a chosen
@@ -332,6 +446,49 @@ and the Air kept `10.69.0.3` — only the relay-side bridge died.
   left peers with stale ARP for the relay; Link blips until ARP refreshes. Send gratuitous
   ARP / expect a few-second reconverge after any address change.
 
+### M1 single-Mac verification (2026-07-04/05) — four reproduced findings (R005-T10)
+
+Driving the shipped M0+M1 stack (`ipauro-core` + the `SMAppService` helper) on one Mac, with
+no second machine, surfaced four failures that no unit test could have found. Each is now
+handled in code with a named test, per §9 of the plan ("each failure mode → a named test case").
+
+1. **Stale helper survives a bundle replacement.** launchd keeps the RESIDENT helper process
+   alive when the `.app` is replaced, so a freshly-installed core drives the PREVIOUS build —
+   observed as an M0 helper answering `bad request: unknown variant` to M1 verbs. Registration
+   has to be cycled before the new binary runs. *Fix:* the core compares the helper's `Pong`
+   version against its own and cycles registration on a mismatch
+   (`ipauro_core::helper_link::SupervisedHelper`). **The package version cannot carry that
+   signal** — it is `0.0.1` for every build of every milestone — so `packaging/lib/common.sh`
+   stamps a per-run `IPAURO_BUILD_ID` that both binaries compile into `build_version()`.
+   Note the deliberate cost: unregistering kills the helper, so its fail-open grace window
+   restores stock networking, and the bounce can leave registration in `RequiresApproval`.
+   Tests: `helper_link::tests::a_stale_helper_bounces_registration_once_not_once_per_request`.
+2. **`:67` is held by launchd, not by a visible process.** The DHCP responder failed with a bare
+   `binding :67: Address already in use`. Cause: **launchd socket-activates `*:67` whenever the
+   `bootps` job is loaded**, so the port is held with no `bootpd` running for `lsof` to find —
+   and the prototype's `enable-dhcp.sh` left it loaded with `-w` (persistently). `SO_REUSEADDR`
+   does not get past it. *Fix:* the bind failure is now a diagnosis naming the holder (confirmed
+   via `launchctl print system/com.apple.bootpd`) and the exact reversal,
+   `sudo launchctl unload -w /System/Library/LaunchDaemons/bootps.plist` — blockage-as-first-class
+   (R007's philosophy) arriving early. Tests: `dhcp::server::tests::port_in_use_*`.
+3. **One refused step aborted the whole pass.** A `ServeDhcp` the helper refused (finding 2)
+   ended the reconcile pass, so the pf transport scope went unapplied — even though scoping
+   needs nothing whatsoever from DHCP. *Fix:* a pass now attempts every step whose prerequisites
+   still hold, and reports partial convergence (`reconcile::Facet` / `blocked_by` /
+   `Pass::failures`). Two dependency rules are load-bearing: anything naming the bridge waits on
+   the bridge step, and `DestroyBridge` waits on the scope teardown — tearing the bridge down
+   under a scope we failed to clear blocks the port EVERYWHERE (the incident above). A dead
+   channel still aborts: every remaining verb would fail identically. Tests:
+   `reconcile::tests::a_refused_dhcp_step_does_not_cost_us_the_transport_scope` and siblings.
+4. **`HelperState` only ever went `Connected` at boot.** The snapshot read "registered (not
+   connected)" while commands were flowing through the helper, because the boot ping was the one
+   and only writer. *Fix:* liveness is observed on EVERY exchange (`SupervisedHelper`), including
+   a helper `Err` — a refusal still proves the helper is there. A channel-level failure clears
+   the cached identity, which re-arms the staleness check of finding 1 on the next reconnect;
+   that is exactly the upgrade shape. Tests:
+   `helper_link::tests::a_plain_successful_request_marks_the_helper_connected`,
+   `integration::a_command_that_reached_the_helper_reports_it_connected`.
+
 ## 5. The hard part, distilled: "which interface is the USB link?"
 
 This consumed most of the session. A reliable helper needs a robust answer. Ranked by
@@ -347,6 +504,34 @@ reliability:
    on the wire (not just any `169.254`, which catches `anpi`). Works until the address rolls.
 4. **MAC match across machines:** DO NOT — NCM MACs are host-assigned and don't appear on the
    peer. This is the trap we hit.
+
+### 5.5 Verified against a quiet Mac (2026-07-25, R005-F7)
+
+Captured on an Apple Silicon MacBook Pro with **nothing plugged in**, while porting the
+ranking above into `ipauro-core::discovery`. Four things the original session inferred but
+never saw directly:
+
+- **`anpi` is a child of `AppleUSBDeviceNCMData`.** §3 called `anpi` a decoy without naming
+  the mechanism; this is it. `ioreg -r -c AppleUSBDeviceNCMData` returns `anpi0`, `anpi1`
+  and `anpi2` as `AppleUSBDeviceNCMPrivateEthernetInterface` nodes, interleaved with the
+  real `enN` ones. Any device-side query that greps for interface names rather than the
+  `+-o en[0-9]+` shape will bridge an `anpi`.
+- **A quiet Mac already shows three `enN` under that class** (`en3`, `en4`, `en5` here) —
+  all `status: inactive`, no `inet`, no `inet6`. §5 wrote them as "`en1`..`en6`"; the
+  numbering is machine-specific and must never be hardcoded. The `active` + IPv4 narrowing
+  rejects all three, which is what makes the device-side class safe to query at all.
+- **`inet6` must not count as "configured".** A device-end link that has come up self-assigns
+  an IPv4 (`169.254/16` absent DHCP); the internals do not. But internals frequently *do*
+  carry an IPv6 link-local, so a `grep inet` that also matches `inet6` promotes every one of
+  them to a link.
+- **`netstat -ib` marks a DOWN interface with a trailing `*`** (`gif0*`, `stf0*`). The star is
+  status, not part of the BSD name — a traffic-counter parser that keeps it files the counters
+  under a name no lookup matches, and then silently reports zero traffic forever.
+
+Implementation: `crates/ipauro-core/src/discovery.rs` carries the verbatim captures as test
+fixtures, so these shapes are regression-checked without hardware; its `#[ignore]`d
+`real_machine_identification_holds_its_invariants` re-checks them against a live Mac after a
+macOS update.
 
 ## 6. Design sketch for a "Mac USB Link Bridge Helper"
 

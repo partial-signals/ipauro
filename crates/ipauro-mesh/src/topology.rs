@@ -38,6 +38,12 @@ pub struct PeerFacts {
 pub struct Topology {
     edges: HashMap<NodeId, Vec<Edge>>,
     facts: HashMap<NodeId, PeerFacts>,
+    /// Highest `seq` folded in per author — the dedup watermark. Flood
+    /// dissemination delivers the same record by every path into a node, and a
+    /// healing partition re-delivers a whole backlog in arbitrary order, so
+    /// "newest per author wins" has to be enforced here rather than assumed of
+    /// the transport.
+    seen: HashMap<NodeId, u64>,
 }
 
 impl Topology {
@@ -45,10 +51,38 @@ impl Topology {
         Self::default()
     }
 
+    /// Would this record advance the view — i.e. is its `seq` newer than the
+    /// newest already folded in from that author?
+    ///
+    /// Separate from [`apply`](Self::apply) because a dissemination layer needs
+    /// the answer *before* it pays to re-flood: a record that fails this is one
+    /// every neighbour has already seen, and forwarding it is what turns a flood
+    /// into a broadcast storm. [`apply`] re-checks, so `Topology` is safe to use
+    /// without consulting this first.
+    pub fn accepts(&self, record: &Record) -> bool {
+        self.seen.get(&record.author).is_none_or(|&s| record.seq > s)
+    }
+
     /// Fold one gossip record into the view. Returns whether anything changed
-    /// (callers may re-plan on change). A real impl also ages out stale peers on
-    /// the Link ttl model (ch. 01 §7) — omitted here.
+    /// (callers may re-plan on change).
+    ///
+    /// A record that does not [`accepts`](Self::accepts) is dropped whole and
+    /// returns `false` without mutating anything — a duplicate flood arrival or
+    /// a reordered straggler must not roll the view back to an older link state.
+    /// The watermark advances even for a record that carries no `edges`/`facts`
+    /// (a bare heartbeat or a policy-only relay), so a replay of the record it
+    /// superseded stays rejected.
+    ///
+    /// Two things a real impl adds: ageing stale peers out on the Link ttl model
+    /// (ch. 01 §7), and an incarnation number so an author that restarts and
+    /// resets its `seq` is not mistaken for a replay of itself. Both are absent
+    /// here; a restarted author is currently silent until its `seq` climbs back
+    /// past the watermark.
     pub fn apply(&mut self, record: Record) -> bool {
+        if !self.accepts(&record) {
+            return false;
+        }
+        self.seen.insert(record.author, record.seq);
         let mut changed = false;
         if let Some(facts) = record.facts {
             self.facts.insert(record.author, facts);

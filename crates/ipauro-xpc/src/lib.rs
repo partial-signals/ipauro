@@ -39,6 +39,20 @@
 //! estimate — and it is a plain (non-block) C function, so the primary path
 //! is used directly with no SecCode/audit-token fallback (see crate-level
 //! docs).
+//!
+//! @yah:ticket(R002-B9, "cargo clippy fails workspace-wide: ipauro-xpc::classify_event denied by not_unsafe_ptr_arg_deref")
+//! @yah:status(review)
+//! @yah:at(2026-07-26T02:44:11Z)
+//! @yah:assignee(agent:bundle-anthropic-ashguard)
+//! @yah:parent(R002)
+//! @yah:severity(low)
+//! @yah:gotcha("Tier: Thief — one-line signature change plus call-site fixes; the correct fix is unambiguous.")
+//! @yah:handoff("Fixed as specified: `classify_event` is now `pub unsafe fn` with a `# Safety` clause naming the caller obligation (event must be a live xpc_object_t not yet released). No `#[allow]` was used. crates/ipauro-xpc/src/lib.rs:236")
+//! @yah:handoff("Updated all 4 call sites with SAFETY comments justifying each: app/helper/src/listener.rs:98 + :162 (event delivered by libxpc to a handler), crates/ipauro-core/src/xpc_helper.rs:66 (same) and :114 (owned return of send_message_with_reply_sync).")
+//! @yah:handoff("xpc_helper.rs:66 was classifying the same event twice (once to match, once to format the debug log). Bound it to one `classified` local and log that — one less unsafe call, same output.")
+//! @yah:handoff("Unblocking clippy exposed 5 pre-existing warnings that had been dark on ipauro-core and app/helper. Fixed all 5 so `--workspace` is warning-free: collapsible_if at app/helper/src/executor.rs:233, app/helper/src/failopen.rs:71 (double-nested, collapsed to one let-chain), crates/ipauro-core/tests/m_incident.rs:362; needless_lifetimes at app/helper/src/netutil.rs:40.")
+//! @yah:verify("cargo clippy --workspace --all-targets  # passes clean, zero warnings (verified 2026-07-25)")
+//! @yah:verify("cargo test --workspace  # 288 passed, 0 failed (verified 2026-07-25)")
 
 use block2::Block;
 use std::ffi::{c_char, c_int, c_void};
@@ -221,7 +235,14 @@ pub enum XpcEvent {
 /// (`XPC_TYPE_CONNECTION`), while an accepted peer connection's handler
 /// receives application dictionaries (`XPC_TYPE_DICTIONARY`). Both kinds of
 /// handler can receive `XPC_TYPE_ERROR` singletons.
-pub fn classify_event(event: XpcObject, on_listener: bool) -> XpcEvent {
+///
+/// # Safety
+/// `event` must be a live `xpc_object_t` — the object libxpc handed to an
+/// event handler (or the return of
+/// [`xpc_connection_send_message_with_reply_sync`]), not yet released.
+/// `xpc_get_type` dereferences it. Validity is genuinely the caller's
+/// obligation: this crate cannot check it.
+pub unsafe fn classify_event(event: XpcObject, on_listener: bool) -> XpcEvent {
     let ty = unsafe { xpc_get_type(event) };
     if ty == xpc_type_error() {
         if event == xpc_error_connection_invalid() {

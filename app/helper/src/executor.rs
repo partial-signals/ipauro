@@ -230,10 +230,10 @@ fn parse_bridge_status(stdout: &str) -> BridgeInfo {
     let mut members = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("member: ") {
-            if let Some(name) = rest.split_whitespace().next() {
-                members.push(name.to_string());
-            }
+        if let Some(rest) = line.strip_prefix("member: ")
+            && let Some(name) = rest.split_whitespace().next()
+        {
+            members.push(name.to_string());
         }
     }
     let ipv4 = parse_inet_addresses(stdout).into_iter().next();

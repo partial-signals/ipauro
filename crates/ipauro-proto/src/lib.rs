@@ -134,6 +134,39 @@ pub mod state {
         pub desired_up: bool,
         /// What actually exists right now, if anything.
         pub actual: Option<BridgeInfo>,
+        /// **Data-plane generation.** Increments every time a *fresh* bridge
+        /// interface comes into existence, or the existing one is
+        /// re-addressed — i.e. every time an app holding a socket bound to
+        /// the bridge must rebind (A001's ordered reconcile pass, step 5:
+        /// "signal the audio app to rejoin the new bridge"). Starts at 0,
+        /// meaning "no bridge has existed yet in this service instance".
+        ///
+        /// This exists because of A002 §4's live incident: unplugging ONE USB
+        /// member tears down the WHOLE macOS bridge, and the hub's audio app
+        /// is left with a multicast socket joined on a dead interface. The
+        /// bridge is rebuilt under the same name (`bridge90`) with the same
+        /// address, so *nothing else in the snapshot changes* — an app
+        /// diffing name/members/ipv4 cannot tell a rebuild happened.
+        ///
+        /// Deliberately **level-triggered**: a consumer records the epoch it
+        /// bound at and compares it against every snapshot it sees, so an app
+        /// that was disconnected across the rebuild still notices on
+        /// reconnect (`ServerMessage::Hello` carries the snapshot). An
+        /// edge-triggered "rebind now" event would be missable exactly when
+        /// it matters most.
+        ///
+        /// Membership changes alone do NOT bump it — the interface an app is
+        /// bound to is unchanged, and a spurious rebind costs an audible
+        /// dropout. Nor does teardown (`actual: None`): there is nothing to
+        /// bind to, which the snapshot already says outright.
+        ///
+        /// Per **service instance**: it resets with the service's pid, so an
+        /// app that outlives a service restart sees a lower/repeated epoch
+        /// and rebinds once more than strictly needed — conservative in the
+        /// safe direction. Pair with `ServiceInfo.pid` to tell instances
+        /// apart. `#[serde(default)]`: additive.
+        #[serde(default)]
+        pub epoch: u64,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -403,6 +436,7 @@ mod tests {
                     ipv4: Some("10.69.0.1".into()),
                     prefix: None,
                 }),
+                epoch: 1,
             },
             transport: Default::default(),
         }

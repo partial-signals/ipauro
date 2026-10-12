@@ -1,0 +1,11 @@
+[package]
+name = "ipauro-spatial"
+description = "Object-audio model for IPAuRo: coordinate conventions, ADM-OSC mapping, and the object-encoder contract (W002)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

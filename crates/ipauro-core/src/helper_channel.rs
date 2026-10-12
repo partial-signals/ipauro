@@ -64,6 +64,15 @@ pub struct MockHelper {
     /// to synchronously at the top of `request`, never held across an
     /// `.await`.
     requests: StdMutex<Vec<HelperRequest>>,
+    /// What this mock answers `Ping` with. Defaults to
+    /// [`crate::build_version`] — i.e. a helper built from this same tree, the
+    /// case every other test wants. Override to stand in for the STALE
+    /// resident helper of R005-T10 finding 1.
+    version: String,
+    /// Requests to refuse with `HelperResponse::Err` instead of servicing.
+    /// Exists for the continue-on-error pass (R005-T10 finding 3): a rejected
+    /// step must not abort the steps that don't depend on it.
+    rejected: StdMutex<Vec<HelperRequest>>,
 }
 
 impl MockHelper {
@@ -73,12 +82,40 @@ impl MockHelper {
             scoped_ports: Mutex::new(Vec::new()),
             dhcp_serving: Mutex::new(false),
             requests: StdMutex::new(Vec::new()),
+            version: crate::build_version(),
+            rejected: StdMutex::new(Vec::new()),
         }
+    }
+
+    /// A mock answering `Ping` with someone else's build — the stale resident
+    /// helper that launchd kept alive across a bundle replacement.
+    pub fn with_version(version: impl Into<String>) -> Self {
+        Self { version: version.into(), ..Self::new() }
+    }
+
+    /// Refuse `verb` (matched by exact equality, arguments included) with
+    /// `HelperResponse::Err` from now on.
+    pub fn reject(&self, verb: HelperRequest) {
+        self.rejected.lock().expect("rejected mutex poisoned").push(verb);
     }
 
     /// Every request received so far, in order.
     pub fn requests(&self) -> Vec<HelperRequest> {
         self.requests.lock().expect("requests mutex poisoned").clone()
+    }
+
+    /// The kernel eating the bridge behind our back — A002 §4's blast radius
+    /// as it ACTUALLY lands on macOS. The member-removal path above models
+    /// the destruction as a response to our own `SetBridgeMembers`, which is
+    /// the shape a poll-driven reconciler sees; in the field the cable is
+    /// pulled at an arbitrary moment, so a pass can just as easily open with
+    /// the bridge already gone and rebuild it inside that single pass. That
+    /// variant leaves the before/after reports identical (same name, same
+    /// address) even though every socket bound to the old interface is dead,
+    /// and it is what `reconcile::next_epoch`'s `created` arm exists for.
+    /// Records no request — nothing asked for it.
+    pub async fn destroy_out_of_band(&self) {
+        *self.bridge.lock().await = None;
     }
 }
 
@@ -93,10 +130,12 @@ impl HelperChannel for MockHelper {
     async fn request(&self, req: HelperRequest) -> anyhow::Result<HelperResponse> {
         self.requests.lock().expect("requests mutex poisoned").push(req.clone());
 
+        if self.rejected.lock().expect("rejected mutex poisoned").contains(&req) {
+            return Ok(HelperResponse::Err { message: format!("mock refuses {req:?}") });
+        }
+
         match req {
-            HelperRequest::Ping => {
-                Ok(HelperResponse::Pong { version: env!("CARGO_PKG_VERSION").to_string() })
-            }
+            HelperRequest::Ping => Ok(HelperResponse::Pong { version: self.version.clone() }),
             HelperRequest::Status => {
                 let bridge = self.bridge.lock().await;
                 Ok(HelperResponse::Bridge { info: bridge.clone() })

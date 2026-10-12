@@ -68,13 +68,12 @@ impl FailOpen {
     /// cleared as soon as it fires, so subsequent polls return `None` until
     /// another disconnect starts a new window.
     pub fn poll(&mut self, now: Instant) -> Action {
-        if self.connections == 0 {
-            if let Some(deadline) = self.deadline {
-                if now >= deadline {
-                    self.deadline = None;
-                    return Action::Destroy;
-                }
-            }
+        if self.connections == 0
+            && let Some(deadline) = self.deadline
+            && now >= deadline
+        {
+            self.deadline = None;
+            return Action::Destroy;
         }
         Action::None
     }

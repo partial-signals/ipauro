@@ -1,4 +1,28 @@
 <!--
+@yah:ticket(R005-T10, "M1 field-findings hardening (from the 2026-07-04/05 single-Mac verification)")
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-07-26T22:14:14Z)
+@yah:phase(P1)
+@yah:parent(R005)
+@yah:gotcha("Four findings from live single-Mac M1 verification, each reproduced: (1) STALE HELPER AFTER UPGRADE: launchd keeps the resident helper process across a bundle replacement, so new verbs bounce off the old daemon (observed: M0 helper rejecting M1 verbs) until registration is cycled. Fix: core compares Pong version vs its own and bounces registration automatically on mismatch. (2) PORT-67 DIAGNOSIS: 'binding :67' must become 'another DHCP server holds port 67 (bootpd / Internet Sharing?)' — launchd socket-activation holds *.67 when bootps is enabled (the prototype's enable-dhcp.sh left it loaded -w). Blockage-as-first-class, R007 philosophy arriving early. (3) CONTINUE-ON-ERROR PLAN EXECUTION: a ServeDhcp failure aborted the whole pass, leaving scope unapplied though scoping is independent of DHCP; executor should attempt independent steps and report partial convergence. (4) HELPER-STATE FRESHNESS: snapshot showed 'registered (not connected)' while requests were flowing — only the boot ping ever sets Connected; any successful helper request should refresh it.")
+@yah:handoff("(1) STALE HELPER: new ipauro_core::helper_link::SupervisedHelper wraps HelperChannel, compares the helper's Pong build against ipauro_core::build_version(), and cycles registration on mismatch (once per distinct stale build, never in a loop).")
+@yah:handoff("(1b) The compare needed a real per-build signal: packaging/lib/common.sh now stamps IPAURO_BUILD_ID (git sha + dirty + epoch) which both ipauro-core and ipauro-helper compile into build_version(). The workspace version is 0.0.1 for every build of every milestone, so version-vs-version alone could never have caught the observed M0-helper case. Confirmed cargo tracks the option_env! var and rebuilds.")
+@yah:handoff("(2) PORT-67: app/helper/src/dhcp/server.rs::describe_bind_failure turns EADDRINUSE into a diagnosis naming the holder (confirmed by new cmd::job_is_loaded -> launchctl print system/com.apple.bootpd) plus the exact reversal (launchctl unload -w /System/Library/LaunchDaemons/bootps.plist). PermissionDenied gets its own root-vs-port message.")
+@yah:handoff("(3) CONTINUE-ON-ERROR: reconcile::drive_once attempts every step whose prerequisites hold (Facet / blocked_by / StepFailure / Pass::failures), refreshes the store from a fresh Report either way, and reports partial convergence. A dead channel (HelperNotConnected) still aborts. Load-bearing rules: bridge-naming verbs wait on the bridge step, and DestroyBridge waits on the scope teardown (A002 s4 - a scope outliving its bridge blocks the port host-wide).")
+@yah:handoff("(3b) Bonus correctness found on the way: bridge.epoch now bumps only on a CreateBridge that SUCCEEDED, not on one that was merely planned.")
+@yah:handoff("(4) HELPER-STATE FRESHNESS: liveness is observed on every exchange (a helper Err counts as live - it proves the helper is there). A channel failure clears the cached identity, which re-arms the staleness check of (1) on the next reconnect - exactly the upgrade shape. New StateStore::mutate_if_changed keeps the per-request refresh off the event stream when nothing changed.")
+@yah:handoff("Docs: A002 gained an 'M1 single-Mac verification (2026-07-04/05)' section recording all four findings, the fix site, and the named test for each (plan s9: every failure mode becomes a named test case).")
+@yah:verify("cargo test --workspace - 18 suites green, 0 failures; re-run under IPAURO_BUILD_ID=probe-epsilon to prove the suite is build-stamp agnostic")
+@yah:verify("cargo clippy --workspace --all-targets - clean")
+@yah:verify("New tests: helper_link::tests::* (8), reconcile::tests::a_refused_{dhcp,bridge}_* / a_refused_scope_teardown_leaves_the_bridge_standing / a_dead_channel_still_aborts_the_pass, dhcp::server::tests::port_in_use_*, state_store::tests::mutate_if_changed_broadcasts_only_a_real_change, integration::a_command_that_reached_the_helper_reports_it_connected")
+@yah:verify("Field re-verification still owed on hardware: bounce the installed bundle and confirm the stale helper is actually cycled (SMAppService cannot be exercised outside a signed bundle).")
+@yah:next("PROTO REQUEST 1 (manager-owned ipauro-proto): give build_version() a home there. It is currently duplicated byte-for-byte in ipauro-core and ipauro-helper because both must produce the identical string and neither may edit the proto crate.")
+@yah:next("PROTO REQUEST 2 (manager-owned ipauro-proto): ReplyOutcome has no way to say 'partial'. A partially-converged pass replies Err (carrying no snapshot) even though the store was refreshed and subscribed clients got the new snapshot on the event stream. A ReplyOutcome::Partial { snapshot, errors } would let a one-shot CLI client see both.")
+@yah:next("Operator decision worth knowing about: the automatic stale-helper bounce unregisters the daemon, so the helper's fail-open grace window restores stock networking (brief data-plane drop) and registration can land in RequiresApproval. Right trade for a helper that cannot service current verbs, but it is a visible behaviour change.")
+-->
+
+<!--
 @yah:ticket(R002-T7, "IPC control facet v0: unix socket; snapshot-on-connect + ordered event stream + versioned commands; CLI reference client — UI client and external apps are the same surface")
 @yah:at(2026-07-02T18:34:11Z)
 @yah:status(done)
@@ -10,11 +34,30 @@
 
 <!--
 @yah:ticket(R002-T8, "Map the macOS 15 Local Network gate across execution contexts (root daemon / launchd user agent / bundled GUI app / SSH) and pin the brain service's placement")
-@yah:at(2026-07-02T18:34:11Z)
-@yah:status(open)
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-07-26T02:16:40Z)
 @yah:phase(P0)
 @yah:parent(R002)
-@yah:gotcha("The tray-app design existed partly to HOLD the Local Network grant; moving the brain into a launchd service reopens the question. Apple's docs suggest out-of-session daemons may be exempt from the gate while user agents can be denied WITHOUT ever showing a prompt — do not trust documentation, verify empirically with the A002 method (BPF sees packet on wire vs app socket receives). Matrix: {root LaunchDaemon, user LaunchAgent in Aqua session, SMAppService agent, bundled GUI app, SSH-launched} x {prompt shown? granted? silently denied?}. Fallback if the agent can't hold the grant: delegate multicast-touching ops (gossip bootstrap beacon, forwarder) to a granted context (the UI client or a helper app). This gate first BITES at M2 (iroh local discovery) — but pin it at M0 while the spine is cheap to reshape.")
+@yah:next("TWO MATRIX ROWS NOT RUN, both by environment limit, NEITHER changes the decision (the agent rows already came back open, and W001 requires the brain to be unprivileged regardless). (a) ROOT LAUNCHDAEMON — needs an operator sudo password; ready-to-paste commands + plist are in crates/ipauro-probe/RUNBOOK.md, and crates/ipauro-probe/dev/*.plist now pass --iface en0 so the row comes back wire-confirmed. (b) OVER SSH — needs a key in authorized_keys; deliberately not added to the operator's machine. Remember row (b) measures sshd's grant, not the binary's.")
+@yah:next("CONFIRMATION STILL OWED AT M2, tracked as a gotcha on R003-F9: ipauro-core has never sent a multicast packet, so its registry entry is permissive by never having been exercised rather than by having been exercised and permitted. R003-F9's bootstrap beacon is the first code that makes it send one — run `ipauro-probe grants --filter ipauro` then and confirm the decision records against io.ipauro.app / io.ipauro.core.")
+@yah:next("RE-RUN THE MATRIX on a managed/MDM Mac before shipping — MDM can preset these decisions, and the reference host is an unmanaged personal machine.")
+@yah:handoff("MEASURED + PINNED (2026-07-25, macOS 26.5.1 / 25F80, single Mac, en0 on a home LAN). DECISION: the brain service STAYS an unprivileged user LaunchAgent (io.ipauro.core) inside the signed bundle, registered via SMAppService. The feared failure mode did NOT occur — a brand-new, never-seen, ad-hoc-signed LaunchAgent in gui/501 got full wire-confirmed bidirectional multicast on Link's own group/port with NO prompt, and macOS recorded an unprompted ALLOW for it. Developer ID signing and bundle embedding changed the recorded identity, not the outcome. The W001 fallback 'delegate multicast-touching ops (gossip beacon, forwarder) to a granted context' is DROPPED — do not build it.")
+@yah:handoff("INSTRUMENT UPGRADED (crates/ipauro-probe). `check` now runs BOTH legs of the A002 method itself — the process socket AND a /dev/bpf tap on the egress interface — because a socket-only probe cannot falsify its own 'gate open': in-kernel multicast loopback can satisfy the socket leg while nothing leaves the machine. New verdicts/exit codes: 0 GATE OPEN · 4 DENIED(inbound) · 5 DENIED(outbound) · 6 LOOPBACK ONLY · 1 INCONCLUSIVE. New --tap-iface watches a different interface than we beacon out of; that is the discriminator between real egress and a loopback copy (XNU routes the loopback copy via lo0 — measured: 9 on an en0 tap AND 9 on an lo0 tap, different copies). Off-path taps are reported unavailable-for-egress, never misread as suppressed egress. Wire tap needs /dev/bpf (root or access_bpf group) and degrades gracefully to the socket-only verdict marked UNCONFIRMED.")
+@yah:handoff("FOUND THE AUTHORITATIVE REGISTRY. macOS records local-network posture per code identity in /Library/Preferences/com.apple.networkextension.plist (world-readable NSKeyedArchiver; MulticastPreferenceSet = a decision exists, DenyMulticast = the decision). New `ipauro-probe grants [--filter X] [--denied-only]` reads it. CRITICAL semantics: `unset` is NOT `denied` — it is the permissive default (236 of 263 records on this host are unset with traffic flowing normally). R007-F1 must not fold those two states together.")
+@yah:handoff("IDENTITY ATTRIBUTION MODEL (this invalidates a class of test). A binary run from a shell gets NO registry identity of its own — it is attributed to the responsible app (our shell runs went to dev.yah; target/release/ipauro-probe never got an entry). So running the probe from Terminal or over SSH measures TERMINAL's or SSHD's grant, not the binary's; those are rows about the parent app. Only a launchd job has an independent identity: a bare executable is keyed by signing-identifier + path, and a bundle-embedded job with AssociatedBundleIdentifiers is keyed by the BUNDLE id with no path.")
+@yah:handoff("DISCOVERED + FIXED IN THIS PASS (packaging, not just noted): the grant binds to the CODE-SIGNING IDENTIFIER, and codesign derives that from the filename when not told otherwise — so ipauro-core was signing as the bare, unnamespaced identifier `ipauro-core`. That is the name the user's grant binds to and the name System Settings shows. packaging/lib/common.sh now has codesign_identifier_for() and packaging/build-app.sh signs each embedded executable with an explicit --identifier matching its launchd label (io.ipauro.core, io.ipauro.helper, io.ipauro.app.cli) and ASSERTS it landed, failing the build on drift. Safe wrt XPC caller auth, which pins the TEAM ID only (ipauro_proto::helper::peer_requirement), never a signing identifier — verified before changing. Bundle rebuilt + packaging/verify.sh OK.")
+@yah:handoff("DOCS: A002 gains 'Local Network gate — execution-context matrix, measured (R002-T8)' (full matrix, method, identity model, and an explicit limits section). W001 §4 brain-service bullet and §8 risk bullet updated to the pinned decision + narrowed residual risk. A001's superseded-note updated (Thread 2's 'only a GUI app can hold the grant' is now obsolete). crates/ipauro-probe/RUNBOOK.md substantially rewritten: matrix filled, two-command method, exit-code table, identity-attribution table, and a correction — the old runbook said wire-silence means 'not a privacy-gate issue, look at routing', but wire-silence after a successful sendto is exactly the OUTBOUND denial signature.")
+@yah:handoff("VERIFIED: cargo test -p ipauro-probe 59 passed (was 42); full workspace build + tests green; cargo clippy -p ipauro-probe --all-targets clean; cargo fmt applied. Live end-to-end re-run after fmt still GATE OPEN wire-confirmed. `grants` output cross-validated against an independent Python extractor — identical counts (263 records, 27 allowed, 236 unset, 0 denied).")
+@yah:verify("cargo test -p ipauro-probe  # 59 tests, incl. pinned macOS BPF ioctl encodings and the NSKeyedArchiver walk")
+@yah:verify("cargo clippy -p ipauro-probe --all-targets  # clean")
+@yah:verify("./target/release/ipauro-probe check --seconds 8 --iface en0  # expect exit 0, 'wire-confirmed'")
+@yah:verify("./target/release/ipauro-probe check --seconds 4 --iface en0 --tap-iface awdl0  # off-path tap must report unavailable-for-egress, NOT 'egress suppressed'")
+@yah:verify("./target/release/ipauro-probe grants --filter ipauro  # io.ipauro.app must not be DENIED")
+@yah:verify("bash packaging/build-app.sh && bash packaging/verify.sh  # identifier assertions must pass: io.ipauro.core / io.ipauro.helper / io.ipauro.app.cli / io.ipauro.app")
+@yah:gotcha("ORIGINAL PREMISE, NOW DISPROVED ON macOS 26.5.1 (kept for the record): 'Apple's docs suggest out-of-session daemons may be exempt from the gate while user agents can be denied WITHOUT ever showing a prompt.' Measured: user agents are NOT denied — they are auto-allowed unprompted. The fallback this ticket sketched (delegate multicast ops to a granted context) is dropped; do not build it.")
+@yah:gotcha("DO NOT OVERREAD THIS RESULT. No denial was observed anywhere on the test host (0 of 263 registry records), so the run demonstrates the AUTO-GRANT path and does NOT demonstrate that the detector catches a live denial on macOS 26 — the negative case still rests on A002's macOS 15 SSH finding. The wire leg's ability to report a true zero IS independently shown (off-path tap → 0). Single host, single OS version, already-logged-in session; boot-before-login and fast-user-switch are untested; a managed/MDM Mac may differ. A002's limits section is the canonical list — read it before relying on this.")
+@yah:gotcha("LEFT ON THE OPERATOR'S MACHINE (harmless, but you should know): the launchd matrix rows each recorded a permanent entry in the user's Local Network privacy list, keyed by signing identifier + path. Booting the job out does NOT remove them. Currently present: `ipauro_probe-e5fc80dc07c5a537` and `ipauro-probe-agent-devid` (both → /private/tmp/r002-t8/...), plus `io.ipauro.probetest` from the throwaway test bundle. All three point at /tmp paths that no longer matter. The real `io.ipauro.app` entry was deliberately NOT touched — the test bundle was given its own CFBundleIdentifier precisely so a throwaway artifact could not record a grant for the shipping product. All three probe LaunchAgents were booted out and their plists deleted; io.ipauro.core (the real agent) was verified still running and untouched.")
 -->
 
 <!--
@@ -24,6 +67,7 @@
 @yah:phase(P2)
 @yah:parent(R003)
 @yah:gotcha("Chicken-and-egg the plan glosses: iroh-gossip needs at least one known peer, but iroh's default discovery (n0 DNS / pkarr relays) is internet-dependent, and its local-network discovery is mDNS multicast — exactly the traffic class this product manages, and itself subject to the Local Network gate (R002-T8). On a USB-only mesh the bootstrap must be an explicit beacon over the bridge (multicast or subnet broadcast on the appliance net), with internet-based discovery as an additive path, never a dependency. NodeId-derived addressing (R003-T3) gives you WHERE to dial once you know WHO exists; this ticket is the WHO.")
+@yah:gotcha("R002-T8 LAST MILE LANDS HERE (settled 2026-07-25): R002-T8 measured the Local Network gate and PINNED the brain at an unprivileged user LaunchAgent — a user agent DOES hold the multicast grant on macOS 26.5.1 (wire-confirmed, no prompt), so the old 'delegate multicast-touching ops to a granted context' fallback is dropped; do NOT build it. BUT ipauro-core has never actually sent a multicast packet, so its registry entry is permissive only by never having been exercised. THIS ticket is the first code that makes it send one. When the beacon works, run `ipauro-probe grants --filter ipauro` and confirm a decision records against io.ipauro.app / io.ipauro.core and is not DENIED — that closes R002-T8's one open thread. Note `unset` is NOT `denied` (it is the permissive default); only an explicit DenyMulticast is a denial. Full method + limits: A002 'execution-context matrix, measured (R002-T8)'.")
 -->
 
 <!--
@@ -33,7 +77,8 @@
 @yah:phase(P2)
 @yah:parent(R003)
 @yah:gotcha("Rule: 48 kHz is the One Rate — default it, evangelize it, gossip it as a mesh-consensus value (sibling of NodeId addressing). Homogeneity makes the divergent-rate conversion problem evaporate. Raisable (e.g. 96k session) only by lifting the WHOLE mesh together, never two nodes diverging. Cascade governs only exceptions: (a) input -> match corresponding output; (b) output -> match host hardware clock; (c) generic external input OR fan-out with no single partner rate -> mesh rate. (a)+(b) chain so authority lands at the consuming hardware. CRITICAL distinction: nominal-rate agreement != clock drift — even at shared 48k, crystals drift ppm so R010-F4's ASRC still runs, but near-unity (cheap) not a 2x ratio. Caveat: 48k suffices only for HUMAN audiences; machine-listening/measurement/ultrasonic is the only reason to go higher and it's out of IPAuRo's lane.")
-@yah:gotcha("Rate participation is CAPABILITY-based, never by protocol name (no type-name-sniffing): a stream participates iff it carries PCM samples (the canonical 'signal' payload). A pure-sync stream (classic tempo/phase sync, no samples) doesn't participate; an audio-carrying stream does — decided from the payload, NOT from whether the protocol is called 'Link'. (NB: 'Link Audio' may carry actual audio — outside the training corpus; confirm its real behavior with the project owner, don't assume sync-only.)")
+@yah:gotcha("Rate participation is CAPABILITY-based, never by protocol name (no type-name-sniffing): a stream participates iff it carries PCM samples (the canonical 'signal' payload). A pure-sync stream (classic tempo/phase sync, no samples) doesn't participate; an audio-carrying stream does — decided from the payload, NOT from whether the protocol is called 'Link'.")
+@yah:gotcha("SETTLED 2026-07-25 (was an open 'confirm with the project owner' question): LinkAudio v1 DOES carry audio — PCM i16, big-endian, frame-interleaved, 1-2 channels, declared sample rate (link-wire-spec ch.03 s5.4-5.5). So it participates in the sample-rate policy. The capability-based rule above is unchanged; it now just has a decided answer for this case. Note the rate it declares is NOMINAL and Link disciplines no rate at all (ghost slope fixed at 1, offset re-measured every 30 s), which is why this ticket's 'even at shared 48k, crystals drift ppm so R010-F4's ASRC still runs' is exactly right — ASRC is mandatory even for Link's OWN audio protocol, not just foreign ones.")
 -->
 
 <!--
@@ -127,10 +172,26 @@
 
 <!--
 @yah:ticket(R005-F7, "Robust USB-NCM interface identification: IOKit provenance (host AppleUSBNCMData) + device-side AppleUSBDeviceNCMData + traffic-based peer fallback; never MAC-match, skip anpi decoys")
-@yah:at(2026-06-28T03:09:21Z)
-@yah:status(open)
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-07-26T03:04:04Z)
 @yah:phase(P1)
 @yah:parent(R005)
+@yah:handoff("Ported A002 §5's identification ranking into `ipauro-core::discovery` as types + one pure classifier, replacing the host-only lookup: `Evidence{HostIokit,PeerTraffic,DeviceIokit}` (Ord = A002's reliability ranking), `LinkRole{Host,Device,Internal}`, `UsbLink`, `LinkInventory`. `classify()` is pure; `identify()` runs one pass over `UsbNcmSource`, now three methods (`discover` / `discover_device_side` / `observe`).")
+@yah:handoff("Device-side `AppleUSBDeviceNCMData` is now QUERIED and narrowed (parity with `prototype/usb-link-bridge.sh`'s `discover_device_side()`: `status: active` + an IPv4), and classified as `Device` vs `Internal` rather than ignored — so the rejection of macOS's inter-processor interfaces is auditable instead of silent.")
+@yah:handoff("Safety property that makes querying that class acceptable: `LinkInventory::bridge_members()` returns host-provenance links ONLY, enforced by `UsbLink::bridge_eligible()`. Proven through the LIVE service by `crates/ipauro-core/tests/integration.rs::device_class_interfaces_never_reach_the_helper`, which asserts no `HelperRequest` ever named a device-class interface — not just that the final snapshot looks right.")
+@yah:handoff("Traffic fallback (A002 §5.2) = per-interface `netstat -ib` input-packet DELTA between consecutive passes. Baseline observations are carried in `StateStore` next to the inventory; a counter that went BACKWARDS is a re-created interface, not traffic.")
+@yah:handoff("New pure parsers `parse_ifconfig_state` / `parse_netstat_input_packets`, tested against VERBATIM output captured from a real Mac (see the gotcha).")
+@yah:handoff("`reconcile::drive_once` identifies via `spawn_blocking` — `ioreg` walks the whole IORegistry (~100ms) and this task shares a runtime with the IPC server. `drive_once`/`commands::handle` take `&Arc<dyn UsbNcmSource>` to allow that.")
+@yah:handoff("Behaviour change: bridge member lists are now sorted/canonical, so `SetBridgeMembers` is a function of WHICH interfaces are links, never of `ioreg`'s print order (`tests/m_incident.rs:176` updated to match).")
+@yah:gotcha("FIELD FINDINGS, live capture on a QUIET Mac (Apple Silicon MBP, nothing plugged in, 2026-07-25) — four things A002 §5 had only inferred, now canon in A002 §5.5 and frozen as verbatim test fixtures: (1) `anpi0/1/2` really ARE children of `AppleUSBDeviceNCMData`, as `AppleUSBDeviceNCMPrivateEthernetInterface` — that is the MECHANISM by which §3's decoy would get bridged; only the `+-o en[0-9]+` shape keeps them out. (2) A quiet Mac already shows THREE `enN` under that class (`en3`/`en4`/`en5` here); A002 wrote `en1..en6`, so the numbering is machine-specific and must never be hardcoded. (3) `inet6` must NOT satisfy 'configured' — internals carry IPv6 link-locals, so a bare `grep inet` promotes every one of them to a link. (4) `netstat -ib` marks DOWN interfaces with a trailing `*` (`gif0*`); keeping the star files counters under a name no lookup matches and then silently reports zero traffic forever.")
+@yah:gotcha("PROTO CONTRACT REQUEST (`ipauro-proto` is manager-owned and was NOT edited): the device-side and traffic findings have no wire field, so today they reach an operator only through a service log line (`LinkInventory::summary`, emitted on a classification change). Requested additive change: `Snapshot.links: LinkState { host: Vec<IdentifiedLink>, device: Vec<IdentifiedLink> }` with `IdentifiedLink { name, role, evidence }`, all `#[serde(default)]` — no `PROTOCOL_VERSION` bump. That lets `ipauro status` and the tray UI answer A002 §5's own question ('which interface is the USB link?') on BOTH ends of the cable, which is the whole point of identifying the device end. `StateStore::link_inventory()` is already the ready-made source; `cli/src/format.rs` needs ~10 lines once the field exists.")
+@yah:gotcha("Sibling-ID collision fixed in passing: `R005-T7` shared numeric index 7 with this ticket (the per-relay child counter is one shared sequence across kinds). Renamed the later-created one to `R005-T10` — annotation in A001 plus its one reference in W002. `board.adopt` is NOT the tool for this: on A001 it proposes renumbering every relay in the file (R002→R012 …), because those relays are declared in W001.")
+@yah:verify("`cargo test --workspace` — 18 test binaries green (70 in `ipauro-core --lib`, incl. the new identification suite); `cargo clippy --workspace --all-targets` clean.")
+@yah:verify("Hardware re-check, to be re-run after any macOS update: `cargo test -p ipauro-core --lib -- --ignored --nocapture real_machine`. It asserts the invariants that hold on ANY Mac plugged in or not (every identified name passes the decoy gate; nothing device-class is bridge-eligible; only gated names are handed to `ifconfig`) and prints the inventory. Ran here: `en3=internal(rejected)[device-iokit] en4=internal(rejected)[device-iokit] en5=internal(rejected)[device-iokit]`, no host links (no cable attached).")
+@yah:verify("Mutation check: make `classify`'s `role` unconditionally `LinkRole::Host` — `discovery::tests::device_side_links_are_never_bridge_eligible` AND `tests/integration.rs::device_class_interfaces_never_reach_the_helper` must both fail.")
+@yah:verify("Mutation check: drop the `.trim_end_matches('*')` in `parse_netstat_input_packets` — `netstat_strips_the_down_interface_star_from_the_name` must fail.")
+@yah:verify("STILL UNVERIFIED ON HARDWARE (no second Mac / no USB-C cable in this session): the ACCEPT paths. Nothing here has seen a real host-side `AppleUSBNCMData` interface, a real configured device-end link, or a real non-zero traffic delta — those are exercised only by canned fixtures. A two-Mac pass should confirm `bridge_members()` picks up the host link and that `summary()` shows `device[...+traffic]` on the far end.")
 -->
 
 <!--
@@ -313,7 +374,7 @@
 <!--
 @yah:ticket(R005-T6, "DHCP as ingestion adapter for foreign (non-IPAuRo) devices only: control-plane-allocated address, NO gateway option, gossip the assignment; cope with link-local self-assign")
 @yah:at(2026-06-28T02:50:51Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P1)
 @yah:parent(R005)
 @yah:gotcha("DHCP is NOT network infrastructure here and nobody depends on one node for it. It is ONLY for ingesting a foreign (non-IPAuRo) device plugged into a hub. Even then the hub is not an authority: the CONTROL PLANE allocates the address (so two hubs can't collide), the hub's local responder just delivers it with NO router/gateway option (never makes the audio segment a default route), and the assignment is gossiped so the foreign leaf becomes addressable mesh-wide. If the leaf only self-assigns link-local and won't lease, cope/map it.")
@@ -323,7 +384,7 @@
 <!--
 @yah:ticket(R005-T5, "Port pf transport-scope (load/flush/restore; pf off before bridge rebuild) into helper — anchor-based, never whole-ruleset replace")
 @yah:at(2026-06-28T02:50:49Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P1)
 @yah:parent(R005)
 @yah:gotcha("Do NOT port pf-prefer.sh literally: the PoC replaces the ENTIRE ruleset (clobbering Apple's com.apple/* anchors and any VPN/firewall rules) and flushes ALL states globally (-F states kills other software's connections). The helper uses a dedicated ANCHOR (pfctl -a ipauro) spliced into the existing ruleset, and SELECTIVE state kill (pfctl -k on the scoped port/addresses). The shell script is the spec for the cut-and-restore BEHAVIOR (incl. the stateful-pf flush discipline), not for the mechanism.")
@@ -332,7 +393,7 @@
 <!--
 @yah:ticket(R005-T4, "Port bridge discovery + member reconcile (usb-link-bridge.sh) into helper")
 @yah:at(2026-06-28T02:50:46Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P1)
 @yah:parent(R005)
 -->
@@ -340,23 +401,37 @@
 <!--
 @yah:ticket(R005-F3, "Desired-state reconciler core in Rust: idempotent + ordered actual->desired passes")
 @yah:at(2026-06-28T02:49:27Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P1)
 @yah:parent(R005)
 -->
 
 <!--
 @yah:ticket(R005-T2, "Replug self-heal end-to-end: member unplug -> rebuild + app-rebind (M-incident test)")
-@yah:at(2026-06-28T02:49:08Z)
-@yah:status(open)
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-07-26T01:15:46Z)
 @yah:phase(P1)
 @yah:parent(R005)
+@yah:handoff("The rebuild half was already green on pickup (tests/m_incident.rs). This session built the MISSING app-rebind half — A001's ordered-pass step 5, \"signal the audio app to rejoin the new bridge\", which had no implementation anywhere in the tree.")
+@yah:handoff("Primitive: `Snapshot.bridge.epoch` (ipauro-proto, `#[serde(default)]` additive). A data-plane generation that bumps when a fresh bridge interface appears or is re-addressed — the ONLY snapshot field that moves across a blast-radius rebuild, since the bridge returns under the same name with the same address.")
+@yah:handoff("Rule: `reconcile::next_epoch` (crates/ipauro-core/src/reconcile.rs). Bumps on `created` (this pass issued CreateBridge) OR on rebind-identity change (name/ipv4). Does NOT bump on membership change (spurious rebind = audible dropout) or on teardown (nothing to bind to). `created` is load-bearing for the REAL macOS path, where a pass opens with the bridge already gone and rebuilds it before anything is reported — identity alone shows no change there.")
+@yah:handoff("Consumer wired: `ipauro watch`. `format::rebind_notice` + `client::watch_loop` track the generation from the Hello snapshot and print a rebind notice once per change; `--json` stays machine-clean (epoch already rides the raw line). `pretty_snapshot`/`pretty_event_line` show `gen`.")
+@yah:handoff("Tests: 6 new unit tests on `next_epoch`; `MockHelper::destroy_out_of_band` added to model the kernel eating the bridge with no membership change; 2 new integration tests in tests/m_incident.rs (`m_incident_signals_app_rebind_over_the_event_stream` drives a real subscribed client as the audio app and asserts EXACTLY one rebind per unplug + monotonicity; `a_rebuild_within_one_pass_still_signals_a_rebind` covers the field shape); 4 new CLI tests. Both levels mutation-checked — deleting the `created` arm fails the unit test AND the integration test.")
+@yah:handoff("Docs: A001's reconcile section now records step 5's mechanism (epoch, level-triggered, what does/doesn't bump).")
+@yah:handoff("`cargo test --workspace` fully green. Clippy verified on ipauro-proto + ipauro-cli only — ipauro-core cannot be clippy'd due to pre-existing R002-B9 (filed).")
+@yah:verify("cargo test --workspace  # all green as of this session")
+@yah:verify("cargo test -p ipauro-core --test m_incident  # 5 tests, ~2s")
+@yah:verify("Mutation check: drop the `created ||` in reconcile::next_epoch — `epoch_bumps_on_an_identical_rebuild_within_one_pass` and `a_rebuild_within_one_pass_still_signals_a_rebind` must both fail.")
+@yah:gotcha("The epoch is PER SERVICE INSTANCE — it resets with the pid, so an app outliving a service restart rebinds once more than strictly needed. Conservative in the safe direction; pair with `ServiceInfo.pid` to tell instances apart. Persisting it is deliberately not done at M1.")
+@yah:gotcha("Followups filed: R005-F9 (UI has no rebind surface — needs a UI-local latched notice, which collides with `state.rs`'s 'no state the service doesn't have' rule) and R002-B9 (pre-existing clippy denial in ipauro-xpc blocking workspace clippy).")
+@yah:gotcha("Shared tree: @Ashguard:nautilus (session:e5961b59) is live on R002 and holds uncommitted edits across crates/ipauro-probe/*. Disjoint from this ticket's files (ipauro-proto / ipauro-core / ipauro-cli / app/ui) — do not sweep those into a commit for R005-T2.")
 -->
 
 <!--
 @yah:ticket(R005-F1, "IOKit USB attach/detach watch in app drives event-driven reconcile")
 @yah:at(2026-06-28T02:49:08Z)
-@yah:status(open)
+@yah:status(done)
 @yah:phase(P1)
 @yah:parent(R005)
 -->
@@ -424,8 +499,11 @@
 > license), **and the 2026-07-02 brain/face split**: the desired-state brain is now a
 > launchd/systemd *service*, and the tray UI is a thin, stateless client of the IPC API — Thread
 > 2's "tray app holds the brain" table below is superseded (the grant/IOKit/iroh rows move to the
-> service, pending R002-T8's grant-context validation). Where this doc and W001 differ, **W001
-> wins.** Read W001 first.
+> service). **R002-T8 settled the grant-context question on 2026-07-25:** a user LaunchAgent does
+> hold the Local Network grant, so the "holds Local Network grant" row moves to the brain service
+> with no caveat, and Thread 2's implication that only a *GUI* app can hold it is obsolete —
+> measured matrix, method and limits in A002, "execution-context matrix, measured (R002-T8)".
+> Where this doc and W001 differ, **W001 wins.** Read W001 first.
 `@arch:see(.yah/docs/architecture/A002-ipauro-findings.md)` — empirical base.
 `@arch:see(.yah/docs/working/W001-ipauro-plan.md)` — M0–M5 roadmap.
 
@@ -658,6 +736,17 @@ membership, (2) flush stray member IPs + (re)assign the bridge address, (3) (re)
 for the current bridge, (4) ensure DHCP, (5) signal the audio app to rejoin the new bridge.
 Order matters — pf scoped to a now-dead bridge blocks the audio port on *everything* (we hit
 this: had to `pf off` before rebuilding).
+
+**Step 5's mechanism is a data-plane generation counter, `Snapshot.bridge.epoch`** (R005-T2).
+The rebuilt bridge comes back under the same name with the same address, so an app diffing the
+snapshot sees a perfectly steady bridge while its multicast socket sits on a dead ifindex —
+the epoch is the only field that moves. It bumps when a *fresh* interface appears or the
+existing one is re-addressed, and deliberately NOT on a membership change (a spurious rebind
+costs an audible dropout) or on teardown (nothing to bind to). Level-triggered on purpose: an
+app records the epoch it bound at and compares it against every snapshot, including `Hello`'s,
+so an app that was disconnected across the rebuild still notices on reconnect — an
+edge-triggered "rebind now" event would be missable exactly when it matters. `ipauro watch` is
+the reference consumer (`ipauro_cli::format::rebind_notice`).
 
 **Failure-mode coverage** (each a reconcile/test case): member unplug → bridge gone → rebuild +
 app-rebind; peer replug → DHCP re-lease; cable dead/charge-only → surface, don't spin;

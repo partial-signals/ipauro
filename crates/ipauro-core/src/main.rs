@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     log::info!(
         "ipauro-core {} (protocol v{}) starting on {}",
-        env!("CARGO_PKG_VERSION"),
+        ipauro_core::build_version(),
         ipauro_proto::PROTOCOL_VERSION,
         socket_path.display(),
     );

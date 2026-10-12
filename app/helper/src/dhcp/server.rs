@@ -24,9 +24,17 @@ use socket2::{Domain, Protocol, Socket, Type};
 use super::lease::LeaseTable;
 use super::packet::Packet;
 use super::responder::{self, DhcpConfig};
+use crate::cmd;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
+/// launchd label of macOS's own DHCP server — the daemon Internet Sharing
+/// drives, and the one the prototype's `enable-dhcp.sh` enabled. Asked about
+/// (never started or stopped) purely to name the holder of `:67`.
+const BOOTPD_LABEL: &str = "com.apple.bootpd";
+/// The launchd job that socket-activates `*:67` on bootpd's behalf. Named in
+/// the diagnosis because unloading THIS is what frees the port.
+const BOOTPS_PLIST: &str = "/System/Library/LaunchDaemons/bootps.plist";
 /// ~1 hour, per `ipauro-proto`'s intent for the M1 pool (see
 /// `defaults::DHCP_POOL_START`/`DHCP_POOL_END` neighbors) — not carried by
 /// `HelperRequest::ServeDhcp` itself, so it's this responder's own fixed
@@ -131,9 +139,52 @@ fn bind_bridge_socket() -> Result<UdpSocket> {
         .with_context(|| format!("IP_BOUND_IF (binding the DHCP socket to {BRIDGE_NAME})"))?;
 
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DHCP_SERVER_PORT);
-    socket.bind(&bind_addr.into()).context("binding :67")?;
+    if let Err(e) = socket.bind(&bind_addr.into()) {
+        // Only ask launchd who holds the port when the port is actually the
+        // problem — the probe is a process spawn.
+        let bootpd_loaded =
+            e.kind() == std::io::ErrorKind::AddrInUse && cmd::job_is_loaded(BOOTPD_LABEL);
+        anyhow::bail!("{}", describe_bind_failure(&e, bootpd_loaded));
+    }
     socket.set_read_timeout(Some(POLL_INTERVAL)).context("setting DHCP socket recv timeout")?;
     Ok(socket.into())
+}
+
+/// Turn a failed `bind(:67)` into a sentence an operator can act on, rather
+/// than the bare `binding :67: Address already in use` that M1 field
+/// verification hit (R005-T10 finding 2).
+///
+/// The blockage this exists for: **launchd socket-activates `*:67` for
+/// `bootps` whenever that job is loaded**, so the port is held even though no
+/// `bootpd` process is running and `lsof` shows nothing — and the prototype's
+/// `enable-dhcp.sh` left it loaded with `-w` (persistently). `SO_REUSEADDR`
+/// does not get us past it. Naming the holder and the exact reversal is the
+/// whole point; a generic "address in use" sends the operator hunting.
+///
+/// `bootpd_loaded` is launchd's answer for [`BOOTPD_LABEL`] ([`cmd::job_is_loaded`]),
+/// which upgrades the wording from a suspicion to a statement. Pure so the
+/// wording is testable without root, a bridge, or a real bind.
+fn describe_bind_failure(e: &std::io::Error, bootpd_loaded: bool) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse if bootpd_loaded => format!(
+            "another DHCP server holds UDP port {DHCP_SERVER_PORT}: launchd reports \
+             {BOOTPD_LABEL} loaded (Internet Sharing, or an `enable-dhcp.sh`-style \
+             `launchctl load -w {BOOTPS_PLIST}` left behind). launchd socket-activates \
+             *:{DHCP_SERVER_PORT} while that job is loaded, so IPAuRo's in-process responder \
+             cannot bind. Free the port with `sudo launchctl unload -w {BOOTPS_PLIST}`."
+        ),
+        std::io::ErrorKind::AddrInUse => format!(
+            "another DHCP server holds UDP port {DHCP_SERVER_PORT} (bootpd / Internet Sharing?). \
+             launchd reports {BOOTPD_LABEL} NOT loaded, so look for a third-party DHCP server \
+             instead; `sudo lsof -nP -iUDP:{DHCP_SERVER_PORT}` names the process, and \
+             `sudo launchctl print system/{BOOTPD_LABEL}` re-checks Apple's."
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "binding UDP port {DHCP_SERVER_PORT} was denied — a privileged port needs root; \
+             the helper must be running as the launchd SYSTEM-domain daemon, not as a user agent."
+        ),
+        _ => format!("binding UDP port {DHCP_SERVER_PORT} on {BRIDGE_NAME} failed: {e}"),
+    }
 }
 
 fn bridge_interface_index() -> Result<NonZeroU32> {
@@ -207,5 +258,55 @@ mod tests {
         let responder = RawSocketDhcpResponder::new();
         assert!(responder.stop().is_ok());
         assert!(!responder.is_serving());
+    }
+
+    // ---- bind diagnosis (R005-T10 finding 2) ---------------------------------
+
+    fn io(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::new(kind, "canned")
+    }
+
+    #[test]
+    fn port_in_use_with_bootpd_loaded_names_the_holder_and_the_fix() {
+        let msg = describe_bind_failure(&io(std::io::ErrorKind::AddrInUse), true);
+        assert!(msg.contains(BOOTPD_LABEL), "{msg}");
+        assert!(msg.contains("unload -w"), "the exact reversal must be spelled out: {msg}");
+        assert!(msg.contains(BOOTPS_PLIST), "{msg}");
+    }
+
+    #[test]
+    fn port_in_use_without_bootpd_points_elsewhere_instead_of_blaming_apple() {
+        let msg = describe_bind_failure(&io(std::io::ErrorKind::AddrInUse), false);
+        assert!(msg.contains("NOT loaded"), "{msg}");
+        assert!(msg.contains("lsof"), "operator needs a way to name the real holder: {msg}");
+        assert!(!msg.contains("unload -w"), "must not prescribe a fix for a job that isn't loaded: {msg}");
+    }
+
+    #[test]
+    fn permission_denied_says_root_not_address_in_use() {
+        let msg = describe_bind_failure(&io(std::io::ErrorKind::PermissionDenied), false);
+        assert!(msg.contains("root"), "{msg}");
+        assert!(!msg.contains("DHCP server holds"), "{msg}");
+    }
+
+    #[test]
+    fn any_other_bind_error_still_surfaces_the_underlying_io_error() {
+        let msg = describe_bind_failure(&io(std::io::ErrorKind::AddrNotAvailable), false);
+        assert!(msg.contains("canned"), "the io::Error must not be swallowed: {msg}");
+        assert!(msg.contains(BRIDGE_NAME), "{msg}");
+    }
+
+    /// Every diagnosis must name the port — the operator's search term.
+    #[test]
+    fn every_diagnosis_names_the_port() {
+        for (kind, loaded) in [
+            (std::io::ErrorKind::AddrInUse, true),
+            (std::io::ErrorKind::AddrInUse, false),
+            (std::io::ErrorKind::PermissionDenied, false),
+            (std::io::ErrorKind::Other, false),
+        ] {
+            let msg = describe_bind_failure(&io(kind), loaded);
+            assert!(msg.contains("67"), "{kind:?}: {msg}");
+        }
     }
 }

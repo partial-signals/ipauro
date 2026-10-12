@@ -11,4 +11,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 gethostname = "1.1"
 if-addrs = "0.13"
+libc = "0.2"
+plist = "1"
 socket2 = { version = "0.6", features = ["all"] }

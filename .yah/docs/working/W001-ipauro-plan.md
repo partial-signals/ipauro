@@ -298,10 +298,18 @@ differ, this file wins.)
 - **Brain service (runs as the user, UNPRIVILEGED, launchd/systemd-managed):** the product core.
   Desired-state brain, iroh control plane, IOKit USB attach/detach watch (needs no root), and the
   IPC server every client connects to. Lives in the user's login session so it can hold the
-  **macOS Local Network grant** for its own multicast (gossip bootstrap, forwarder) — *which
-  execution context can actually hold the grant (root daemon vs launchd user agent vs GUI app) is
-  an M0 validation item (R002-T8)*; the fallback is delegating multicast-touching work to a
-  granted context.
+  **macOS Local Network grant** for its own multicast (gossip bootstrap, forwarder). **Settled
+  2026-07-25 (R002-T8) — placement is PINNED here:** measured on macOS 26.5.1, a user LaunchAgent
+  in `gui/<uid>` holds the grant fine; a brand-new, never-seen, ad-hoc-signed agent got full
+  wire-confirmed bidirectional multicast with *no prompt* and an unprompted recorded allow.
+  Developer ID signing and bundle embedding change the recorded identity, not the outcome. So the
+  brain stays an unprivileged user LaunchAgent (`io.ipauro.core`) inside the signed bundle,
+  registered via `SMAppService`, and **the "delegate multicast-touching work to a granted context"
+  fallback is not needed — do not build it.** Two consequences worth carrying forward: the grant
+  binds to the *code-signing identifier* (hence the explicit `--identifier` per embedded binary in
+  `packaging/build-app.sh`), and the decision is only truly confirmed once the core actually sends
+  multicast at M2 (R003-F9) — re-check with `ipauro-probe grants --filter ipauro` then. Full
+  matrix, method and limits: A002 "execution-context matrix, measured (R002-T8)".
 - **UI client (tray + transient panel, UNPRIVILEGED, stateless — egui, decided 2026-07-02):** a
   thin renderer/commander over the IPC API — hub/peer election, enrollment matrix, blockage
   status, metering. **UX model: Apple Control Center** — opened from the tray for brief
@@ -377,6 +385,9 @@ member unplug tore down the whole bridge.
   IPAuRo), and, candidate, an **inferno-based Dante plugin** (R010-F8) replacing Dante Virtual
   Soundcard — inferno is Linux-only today, so its first home may be a cheap Linux node acting as
   the mesh's Dante gateway.
+  **Atmos-over-HDMI object sink** (W002, evidence A005): the same plugin shape for an AVR's Dolby
+  Atmos renderer, fed from ADM-OSC / canonical `Object` streams. Its encoders are portable Rust, its
+  transports per-OS, and its Plan B is the same cheap-Linux-gateway-node pattern.
 - **Protocol evolution — IPAuRo makes a new protocol survivable.** Two patterns fall out, and
   together they're the generative half of the product:
   - **Superset / "Link++" (no transcode):** a node speaks a backward-compatible *extension* of an
@@ -539,11 +550,17 @@ CPU-bound not bandwidth-bound. Depends on M2 (capability gossip) + M4 (registry)
   helps with EDR).
 
 ## 8. Risks & open questions
-- **macOS 15 Local Network privacy:** the audio side must run in a granted context — never
-  headless-SSH. With the brain now a launchd service, *which* context can hold the grant is
-  unverified (a root daemon may be exempt as out-of-session; a user agent may be denied without
-  ever seeing a prompt) — R002-T8 maps this empirically at M0; fallback is delegating
-  multicast-touching work to a granted context. Also verify the helper-driven app rebind path.
+- **macOS 15 Local Network privacy — RESOLVED for the brain's placement (R002-T8, 2026-07-25).**
+  A user LaunchAgent in `gui/<uid>` holds the grant; the feared silent-deny-without-prompt did not
+  occur on macOS 26.5.1, so the delegate-to-a-granted-context fallback is dropped. Residual risk is
+  real but narrower: (a) **no denial was observed anywhere on the test host** (0 of 263 registry
+  records), so the run demonstrates the auto-grant path rather than proving the detector catches a
+  live denial on macOS 26 — the negative case still rests on A002's macOS 15 SSH finding;
+  (b) single host, single OS version, already-logged-in session — boot-before-login and
+  fast-user-switch are untested; (c) a **managed/MDM Mac may preset these decisions** differently
+  and the matrix should be re-run there; (d) `ipauro-core` has not yet sent multicast, so its
+  registry entry is permissive by never having been exercised — confirm at M2 (R003-F9). The audio
+  side must still never run headless-SSH. Also verify the helper-driven app rebind path.
 - **pf coexistence:** the shipping helper must use a dedicated **anchor** + selective state kill
   (`pfctl -k`), never the prototype's whole-ruleset replace + global `-F states` — those clobber
   Apple's `com.apple/*` anchors and every other pf user (VPNs, firewalls). See R005-T5.
@@ -568,6 +585,26 @@ CPU-bound not bandwidth-bound. Depends on M2 (capability gossip) + M4 (registry)
 ## 9. Test strategy
 - **Control plane → CI (containers):** discovery parsing, NodeId→address, `pf`/rule generation,
   gossip dedup/partition-heal, spanning-tree. No hardware.
+  **Built (R009-T1): `scripts/ci-control-plane.sh` + `.github/workflows/ci.yml`.** The script
+  derives the workspace member list from `Cargo.toml` and fails if any member is not classified
+  as either container-testable or macOS-only-with-a-stated-reason, so a new crate cannot escape
+  CI by omission; `--verify-exclusions` asserts the converse, that each macOS-only crate still
+  genuinely fails to build on Linux. Two corrections to the line above, from building it:
+  - **`pf`/rule generation is not container-testable and never will be.** It lives in
+    `app/helper`, which pulls `ipauro-xpc` → `block2` → `objc2` and cannot compile off Apple
+    platforms — and per W002 §"already portable / not portable" that is deliberate: the Linux
+    agent (R011-F2) emits **nftables** from its own executor rather than sharing pf's generator.
+    So rule-generation coverage lives permanently on the **macOS CI job**, which runs the full
+    workspace with no hardware. Container-vs-macOS is the real seam here, not container-vs-not-CI.
+  - **NodeId→address and spanning-tree have no tests because they have no code yet** (R003-T3,
+    R006-F1). CI is deliberately crate-scoped rather than test-name-scoped, so both are picked
+    up the day they land — nothing further is needed here for them.
+
+  Covered today: five crates run in the container — `ipauro-proto`, `ipauro-core` (all the
+  discovery/`ioreg`/`netstat` fixture parsing plus the reconciler), `ipauro-cli`, `ipauro-mesh`,
+  `ipauro-probe` — which was ~180 tests at the time of writing, against ~350 for the full
+  macOS workspace. Hardware-bound cases stay `#[ignore]`d at the source (e.g. discovery.rs's
+  `real_machine_identification_holds_its_invariants`), so neither tier needs a skip-list.
 - **L2/multicast behavior → macOS VMs on a virtual switch:** bridging, multicast flooding,
   `pf`-forces-onto-interface — **always verify by tear-down-and-re-establish** (an already-up
   session staying up proves nothing under stateful `pf`). No USB needed. (Apple licensing caps

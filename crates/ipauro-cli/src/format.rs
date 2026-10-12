@@ -87,6 +87,10 @@ pub fn pretty_snapshot(snapshot: &Snapshot) -> String {
             bridge_actual_line(&snapshot.bridge.actual),
             bridge_pending_note(&snapshot.bridge)
         ),
+        // Data-plane generation: an app bound to the bridge rebinds when this
+        // moves (`BridgeState::epoch`). Surfaced so an operator chasing a
+        // dropout can see at a glance that the bridge was rebuilt under them.
+        format!("  gen       {}", snapshot.bridge.epoch),
         String::new(),
         "transport:".to_string(),
         format!("  link scope  {}", scope_line(&snapshot.transport)),
@@ -115,12 +119,40 @@ pub fn pretty_event_line(seq: u64, event: &EventBody) -> String {
         // v0 events only ever carry a full snapshot (see ipauro-proto docs on
         // EventBody); a future telemetry-stream variant would need an arm here.
         EventBody::Snapshot { snapshot } => format!(
-            "#{seq}  helper={}  bridge_desired={}  bridge_actual={}",
+            "#{seq}  helper={}  bridge_desired={}  bridge_actual={}  gen={}",
             helper_state_line(&snapshot.helper),
             if snapshot.bridge.desired_up { "up" } else { "down" },
-            bridge_actual_line(&snapshot.bridge.actual)
+            bridge_actual_line(&snapshot.bridge.actual),
+            snapshot.bridge.epoch
         ),
     }
+}
+
+/// The rebind notice an app must act on when the data-plane generation it
+/// bound its sockets at has been superseded — A001's ordered-pass step 5
+/// ("signal the audio app to rejoin the new bridge") rendered for a human.
+/// `None` when no rebind is due.
+///
+/// This is the whole client-side protocol, and it is a two-line diff on
+/// purpose: hold the `epoch` you last bound at, compare it against every
+/// snapshot you see (`Hello`'s included, so a reconnect after the rebuild is
+/// covered), and rejoin when it moves. See `BridgeState::epoch`.
+pub fn rebind_notice(bound_epoch: u64, bridge: &BridgeState) -> Option<String> {
+    if bridge.epoch == bound_epoch {
+        return None;
+    }
+    // No bridge to bind to: `bridge_actual_line` already says "none" and
+    // there is nowhere to rejoin, so a rebind notice would be noise. The
+    // epoch never advances on teardown either (see `next_epoch`), so this
+    // arm only fires on an out-of-order/reset generation.
+    let info = bridge.actual.as_ref()?;
+    Some(format!(
+        "** rebind: {} is now generation {} ({}) — sockets bound at generation {} are on a dead interface **",
+        info.name,
+        bridge.epoch,
+        info.ipv4.as_deref().unwrap_or("no ipv4"),
+        bound_epoch
+    ))
 }
 
 /// Stable string for an `ErrorCode`, matched explicitly per variant.
@@ -156,6 +188,7 @@ mod tests {
                     ipv4: Some("10.69.0.1".into()),
                     prefix: None,
                 }),
+                epoch: 1,
             },
             transport: Default::default(),
         }
@@ -239,5 +272,39 @@ mod tests {
         let line = pretty_event_line(7, &EventBody::Snapshot { snapshot: base_snapshot() });
         assert!(line.starts_with("#7"));
         assert!(line.contains("bridge90"));
+        assert!(line.contains("gen=1"));
+    }
+
+    #[test]
+    fn pretty_snapshot_shows_the_data_plane_generation() {
+        let mut snap = base_snapshot();
+        snap.bridge.epoch = 4;
+        assert!(pretty_snapshot(&snap).contains("gen       4"));
+    }
+
+    #[test]
+    fn no_rebind_notice_while_the_generation_holds() {
+        assert_eq!(rebind_notice(1, &base_snapshot().bridge), None);
+    }
+
+    #[test]
+    fn rebind_notice_names_both_generations_and_where_to_rebind() {
+        let mut bridge = base_snapshot().bridge;
+        bridge.epoch = 2;
+        let notice = rebind_notice(1, &bridge).expect("a superseded generation must be reported");
+        assert!(notice.contains("bridge90"), "{notice}");
+        assert!(notice.contains("generation 2"), "{notice}");
+        assert!(notice.contains("generation 1"), "{notice}");
+        assert!(notice.contains("10.69.0.1"), "{notice}");
+    }
+
+    #[test]
+    fn no_rebind_notice_when_there_is_no_bridge_to_rebind_to() {
+        // A bumped generation with no bridge would be a signal to nowhere;
+        // `actual: none` already tells the operator what happened.
+        let mut bridge = base_snapshot().bridge;
+        bridge.actual = None;
+        bridge.epoch = 9;
+        assert_eq!(rebind_notice(1, &bridge), None);
     }
 }

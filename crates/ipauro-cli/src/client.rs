@@ -8,7 +8,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use ipauro_proto::ipc::{write_msg, ClientMessage, Command, ReplyOutcome, ServerMessage};
+use ipauro_proto::ipc::{write_msg, ClientMessage, Command, EventBody, ReplyOutcome, ServerMessage};
 
 use crate::format;
 use crate::{EXIT_COMMAND_ERR, EXIT_CONNECTION, EXIT_OK};
@@ -145,20 +145,37 @@ pub fn run_command(
 
 /// Print each `Event` as it arrives until EOF (or a read error). Used by
 /// `ipauro watch`.
+///
+/// `bound_epoch` is the data-plane generation observed in the connection's
+/// `Hello` snapshot — the generation a real audio app would have bound its
+/// sockets at when it connected. Each event is checked against it and a
+/// rebind notice printed when it moves (A001's ordered-pass step 5); this is
+/// the reference implementation of the client side of that contract, so an
+/// external app has a worked example of what to do with `BridgeState::epoch`.
+/// `--json` mode stays machine-clean — the epoch is already in the raw line.
 pub fn watch_loop(
     reader: &mut BufReader<UnixStream>,
     json: bool,
+    mut bound_epoch: u64,
     out: &mut dyn Write,
     err_out: &mut dyn Write,
 ) -> i32 {
     loop {
         match read_server_message(reader) {
             Ok(Some((raw, ServerMessage::Event { seq, event }))) => {
+                // Irrefutable today (v0 events only carry a snapshot); a new
+                // `EventBody` variant breaks the build here on purpose rather
+                // than silently stopping the rebind tracking below.
+                let EventBody::Snapshot { snapshot } = &event;
                 if json {
                     let _ = writeln!(out, "{raw}");
                 } else {
                     let _ = writeln!(out, "{}", format::pretty_event_line(seq, &event));
+                    if let Some(notice) = format::rebind_notice(bound_epoch, &snapshot.bridge) {
+                        let _ = writeln!(out, "{notice}");
+                    }
                 }
+                bound_epoch = snapshot.bridge.epoch;
             }
             Ok(Some((_, ServerMessage::Hello { .. }))) => {
                 // The service sends Hello exactly once per connection; ignore

@@ -24,6 +24,8 @@
 		<string>check</string>
 		<string>--seconds</string>
 		<string>10</string>
+		<string>--iface</string>
+		<string>en0</string>
 	</array>
 
 	<key>RunAtLoad</key>

@@ -13,6 +13,7 @@
 pub mod commands;
 pub mod discovery;
 pub mod helper_channel;
+pub mod helper_link;
 pub mod reconcile;
 pub mod registrar;
 #[cfg(target_os = "macos")]
@@ -48,6 +49,26 @@ pub struct ServiceConfig {
     pub usb_source: Arc<dyn UsbNcmSource>,
 }
 
+/// This build's full version identity — the workspace package version plus
+/// the packaging build id, when `packaging/build-app.sh` stamped one in.
+///
+/// Two consumers: the wire-visible `ServiceInfo.version`, and
+/// [`helper_link::SupervisedHelper`]'s staleness check, which compares this
+/// against the version the helper answers `Ping` with. The helper computes
+/// the same string the same way (`app/helper/src/main.rs`'s `build_version`),
+/// so equality means "same build" — which the package version alone cannot
+/// express, since it is `0.0.1` for every build of every milestone.
+///
+/// Deliberately duplicated in `ipauro-helper` instead of shared: the natural
+/// home is `ipauro-proto`, which is manager-owned (flagged in R005-T10's
+/// report). The two copies MUST produce byte-identical output for one build.
+pub fn build_version() -> String {
+    match option_env!("IPAURO_BUILD_ID") {
+        Some(build) => format!("{}+{build}", env!("CARGO_PKG_VERSION")),
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 /// The snapshot every service instance boots with: no helper connection yet,
 /// bridge not desired, stamped with this process's own identity.
 pub fn initial_snapshot() -> Snapshot {
@@ -55,12 +76,12 @@ pub fn initial_snapshot() -> Snapshot {
         SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     Snapshot {
         service: ServiceInfo {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: build_version(),
             pid: std::process::id(),
             started_unix,
         },
         helper: HelperState::NotRegistered,
-        bridge: BridgeState { desired_up: false, actual: None },
+        bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
         transport: Default::default(),
     }
 }
@@ -74,9 +95,19 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
     let reconcile_kick = Arc::new(Notify::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
+    // Every helper exchange in this process goes through the supervisor: it
+    // keeps `Snapshot.helper` current off real traffic and cycles a stale
+    // helper's registration (R005-T10 findings 1 + 4). Transparent to every
+    // caller below — they still see a plain `HelperChannel`.
+    let helper: Arc<dyn HelperChannel> = Arc::new(helper_link::SupervisedHelper::new(
+        config.helper.clone(),
+        store.clone(),
+        config.registrar.clone(),
+    ));
+
     let reconcile_task = tokio::spawn(reconcile::run(
         store.clone(),
-        config.helper.clone(),
+        helper.clone(),
         config.usb_source.clone(),
         reconcile_kick.clone(),
         shutdown_tx.subscribe(),
@@ -93,7 +124,7 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
 
     let handles = ServerHandles {
         store: store.clone(),
-        helper: config.helper.clone(),
+        helper: helper.clone(),
         usb_source: config.usb_source.clone(),
         registrar: config.registrar.clone(),
         reconcile_kick: reconcile_kick.clone(),
@@ -101,30 +132,21 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
     let mut server_task =
         tokio::spawn(server::run(config.socket_path.clone(), handles, shutdown_tx.subscribe()));
 
-    // Boot probe: one Ping to discover whether the helper is reachable. On
-    // Pong the snapshot reflects a live helper; on error we fall back to what
-    // the OS says about registration (NotRegistered / RequiresApproval /
-    // Registered-but-unreachable). Best-effort by design — the reconcile loop
-    // re-drives state on real commands, and a helper that dies later is
-    // observed through failed requests, not here.
+    // Boot probe: one Ping so the snapshot reflects the helper immediately
+    // rather than at the first command. The supervisor above turns the answer
+    // (or the failure) into `Snapshot.helper` and runs the stale-build check,
+    // so this only has to make the call and log it. Best-effort by design —
+    // a helper that becomes reachable, dies, or is replaced LATER is now
+    // observed through ordinary traffic (R005-T10 finding 4), not here.
     {
-        let store = store.clone();
-        let helper = config.helper.clone();
-        let registrar = config.registrar.clone();
+        let helper = helper.clone();
         tokio::spawn(async move {
             match helper.request(ipauro_proto::helper::HelperRequest::Ping).await {
                 Ok(ipauro_proto::helper::HelperResponse::Pong { version }) => {
-                    log::info!("helper reachable (v{version})");
-                    store
-                        .mutate(|s| s.helper = HelperState::Connected { version: version.clone() })
-                        .await;
+                    log::info!("helper reachable (v{version})")
                 }
                 Ok(other) => log::warn!("helper answered Ping with {other:?}"),
-                Err(e) => {
-                    let status = registrar.status();
-                    log::info!("helper not reachable at boot ({e}); registration status: {status:?}");
-                    store.mutate(|s| s.helper = status.clone()).await;
-                }
+                Err(e) => log::info!("helper not reachable at boot ({e})"),
             }
         });
     }

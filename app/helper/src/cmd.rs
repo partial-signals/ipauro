@@ -15,6 +15,28 @@ pub const IFCONFIG: &str = "/sbin/ifconfig";
 /// truth on binary paths.
 pub const PFCTL: &str = "/sbin/pfctl";
 
+/// `/bin/launchctl` — used by [`job_is_loaded`] to name whoever is holding a
+/// resource we wanted (blockage diagnosis, R007's philosophy arriving early
+/// via R005-T10's port-67 finding).
+pub const LAUNCHCTL: &str = "/bin/launchctl";
+
+/// Whether launchd currently has `label` loaded in the SYSTEM domain
+/// (`launchctl print system/<label>` exits nonzero when it doesn't).
+///
+/// Diagnostic-only and best effort: a spawn failure or any nonzero exit reads
+/// as "not loaded", because the caller's job is to enrich an error message,
+/// never to gate behavior on this. Never pass a caller-supplied string — the
+/// only labels asked about are compile-time constants.
+pub fn job_is_loaded(label: &str) -> bool {
+    Command::new(LAUNCHCTL)
+        .args(["print", &format!("system/{label}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Run `program args...`, log the invocation at debug, and bail with stderr
 /// on nonzero exit. Callers needing to distinguish a specific failure text
 /// (e.g. ifconfig's "does not exist") should catch the `Result` and inspect

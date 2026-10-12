@@ -106,7 +106,9 @@ async fn handle_connection(stream: UnixStream, handles: ServerHandles) -> anyhow
         &mut write_half,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            // Same string as the snapshot's `service.version` — one process,
+            // one reported identity (see `crate::build_version`).
+            server_version: crate::build_version(),
             snapshot,
         },
     )
@@ -130,7 +132,7 @@ async fn handle_connection(stream: UnixStream, handles: ServerHandles) -> anyhow
                         let outcome = commands::handle(
                             &store,
                             helper.as_ref(),
-                            usb_source.as_ref(),
+                            &usb_source,
                             registrar.as_ref(),
                             &reconcile_kick,
                             command,

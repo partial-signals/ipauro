@@ -1,6 +1,8 @@
 //! The `eframe::App` impl. Owns exactly the state the M0 ticket allows: the
-//! last-received connection/snapshot state and which of the two view modes
-//! is showing — nothing the service doesn't already have.
+//! last-received connection/snapshot state and which of the two view modes is
+//! showing — nothing the service doesn't already have, save the two
+//! deliberate UI-local exceptions `state.rs` documents (`StatusLine`,
+//! `RebindWatch`).
 //!
 //! Split across `eframe` 0.35's `App::logic`/`App::ui`: `logic` drains the
 //! IPC and tray-menu channels and applies viewport commands, and runs
@@ -14,7 +16,9 @@ use std::time::Duration;
 use eframe::egui::{self, ViewportCommand, WindowLevel};
 use ipauro_proto::ipc::Command;
 
-use crate::state::{reduce, reduce_status, ConnEvent, ConnState, StatusLine};
+use crate::state::{
+    reduce, reduce_rebind, reduce_status, ConnEvent, ConnState, RebindWatch, StatusLine,
+};
 use crate::tray::{self, TrayAction};
 use crate::{ipc_client, panel, theme, widget};
 
@@ -52,6 +56,10 @@ pub struct IpauroApp {
     /// kept separate since it's not part of what the service reports in a
     /// `Snapshot`. See `state::StatusLine`'s doc comment.
     status: StatusLine,
+    /// Latched notice that the data plane was rebuilt under the operator's
+    /// audio app — the only UI state that deliberately outlives a
+    /// `Disconnected`. See `state::RebindWatch`.
+    rebind: RebindWatch,
     ipc_events: Receiver<ConnEvent>,
     commands: Sender<Command>,
     mode: ViewMode,
@@ -70,6 +78,7 @@ impl IpauroApp {
         Self {
             conn: ConnState::default(),
             status: StatusLine::default(),
+            rebind: RebindWatch::default(),
             ipc_events,
             commands,
             mode: ViewMode::Panel,
@@ -83,6 +92,7 @@ impl IpauroApp {
     fn drain_ipc_events(&mut self) {
         while let Ok(event) = self.ipc_events.try_recv() {
             self.status = reduce_status(&self.status, &event);
+            self.rebind = reduce_rebind(&self.rebind, &event);
             self.conn = reduce(&self.conn, event);
         }
     }
@@ -159,8 +169,14 @@ impl eframe::App for IpauroApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         match self.mode {
-            ViewMode::Panel => panel::show(ui, &self.conn, &self.status, &self.commands),
-            ViewMode::Widget => widget::show(ui, &self.conn),
+            ViewMode::Panel => {
+                let outcome =
+                    panel::show(ui, &self.conn, &self.status, &self.rebind, &self.commands);
+                if outcome.rebind_dismissed {
+                    self.rebind.acknowledge();
+                }
+            }
+            ViewMode::Widget => widget::show(ui, &self.conn, &self.rebind),
         }
     }
 }

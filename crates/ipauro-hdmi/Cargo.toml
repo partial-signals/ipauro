@@ -1,0 +1,22 @@
+[package]
+name = "ipauro-hdmi"
+description = "HDMI audio sink capabilities (EDID/CTA-861/ELD, Atmos carrier flags) and host encoded-output probing (Core Audio, ALSA)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[[bin]]
+name = "hdmi-probe"
+path = "src/bin/hdmi-probe.rs"
+
+[[bin]]
+name = "hdmi-passthrough-test"
+path = "src/bin/hdmi-passthrough-test.rs"

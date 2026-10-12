@@ -37,10 +37,7 @@ pub fn is_valid_scope_iface_name(name: &str, bridge_name: &str) -> bool {
 /// Validate every name in `names` against `predicate`, returning the first
 /// offender. Reject-the-whole-request-on-one-bad-name is enforced by the
 /// caller treating any `Some` as "do not exec anything."
-pub fn first_invalid_name<'a>(
-    names: &'a [String],
-    predicate: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
+pub fn first_invalid_name(names: &[String], predicate: impl Fn(&str) -> bool) -> Option<&str> {
     names.iter().map(String::as_str).find(|n| !predicate(n))
 }
 

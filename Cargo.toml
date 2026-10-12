@@ -7,6 +7,9 @@ members = [
     "crates/ipauro-cli",
     "crates/ipauro-mesh",
     "crates/ipauro-probe",
+    "crates/ipauro-iec61937",
+    "crates/ipauro-hdmi",
+    "crates/ipauro-spatial",
     "app/helper",
     "app/ui",
 ]

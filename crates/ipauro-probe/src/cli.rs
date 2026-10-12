@@ -32,6 +32,19 @@ pub enum Command {
     Beacon(BeaconArgs),
     /// Beacon + listen simultaneously; report a gate-open / gate-denied verdict.
     Check(CheckArgs),
+    /// Print macOS's recorded Local Network (multicast) decision per app.
+    Grants(GrantsArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GrantsArgs {
+    /// Only show records whose identifier or path contains this substring
+    /// (case-insensitive).
+    #[arg(long)]
+    pub filter: Option<String>,
+    /// Only show records with an explicit DENY; exit 4 if any exist.
+    #[arg(long)]
+    pub denied_only: bool,
 }
 
 /// Group/port/interface selection shared by every subcommand.
@@ -74,4 +87,21 @@ pub struct CheckArgs {
     /// Milliseconds between beacons.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_MS)]
     pub interval_ms: u64,
+    /// Interface for the BPF wire tap to watch (default: whatever `--iface`
+    /// selects for multicast egress).
+    ///
+    /// Pointing the tap somewhere other than the egress interface is how you
+    /// tell a real transmission apart from an in-kernel multicast loopback
+    /// copy: macOS delivers the loopback copy via `lo0`, so
+    /// `--iface en0 --tap-iface lo0` counts loopback copies while
+    /// `--iface en0` (tap on `en0`) counts frames that actually left.
+    #[arg(long)]
+    pub tap_iface: Option<String>,
+    /// Skip the BPF wire tap and report the weaker socket-only verdict.
+    ///
+    /// The tap needs an interface and read access to `/dev/bpf*` (root, or the
+    /// `access_bpf` group). Without it, `check` cannot tell an open gate from
+    /// loopback-only reception, nor an inbound denial from an outbound one.
+    #[arg(long)]
+    pub no_wire: bool,
 }

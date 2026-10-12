@@ -30,7 +30,7 @@ fn hello_snapshot() -> Snapshot {
     Snapshot {
         service: ServiceInfo { version: "9.9.9-fake".into(), pid: 4242, started_unix: 1_700_000_000 },
         helper: HelperState::Connected { version: "9.9.9-fake".into() },
-        bridge: BridgeState { desired_up: false, actual: None },
+        bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
         transport: Default::default(),
     }
 }
@@ -45,6 +45,7 @@ fn bridge_up_snapshot() -> Snapshot {
                 ipv4: Some("10.69.0.1".into()),
                 prefix: None,
             }),
+            epoch: 1,
         },
         transport: Default::default(),
         ..hello_snapshot()
@@ -101,15 +102,23 @@ fn spawn_fake_server(path: PathBuf, hello_protocol_version: u32, reply: ReplyPla
         }
 
         if subscribe_events {
-            // Watch scenario: one event, then hang up (dropping the streams
-            // closes the socket) so the client's watch loop ends on EOF.
+            // Watch scenario: two events carrying the SAME snapshot, then hang
+            // up (dropping the streams closes the socket) so the client's
+            // watch loop ends on EOF. Two rather than one so a test can tell
+            // a rebind notice that fires on a generation CHANGE from one that
+            // fires on every event.
             let snapshot = match &reply {
                 ReplyPlan::Ok(s) => s.clone(),
                 ReplyPlan::Err(_) => hello_snapshot(),
             };
-            write_msg(&mut writer, &ServerMessage::Event { seq: 1, event: EventBody::Snapshot { snapshot } })
+            for seq in 1..=2 {
+                write_msg(
+                    &mut writer,
+                    &ServerMessage::Event { seq, event: EventBody::Snapshot { snapshot: snapshot.clone() } },
+                )
                 .expect("write event");
-            writer.flush().expect("flush event");
+            }
+            writer.flush().expect("flush events");
             return;
         }
 
@@ -239,6 +248,57 @@ fn watch_prints_one_event_then_exits_on_eof() {
     assert!(stdout.contains("#1"), "stdout: {stdout}");
     assert!(stdout.contains("bridge90"));
     assert!(stdout.contains("bridge_desired=up"));
+}
+
+/// The client half of R005-T2's app-rebind contract, end to end through the
+/// real CLI: `Hello` says generation 0, the pushed event says generation 1,
+/// so `watch` must tell the operator their sockets are on a dead interface —
+/// ONCE. The second event repeats generation 1 and must stay quiet, because a
+/// notice on every event is a notice an app learns to ignore.
+#[test]
+fn watch_reports_a_rebind_once_per_generation_change() {
+    let path = temp_socket_path("watch-rebind");
+    let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(bridge_up_snapshot()));
+
+    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Watch);
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+    assert_eq!(
+        stdout.matches("** rebind:").count(),
+        1,
+        "exactly one rebind notice across two same-generation events: {stdout}"
+    );
+    assert!(stdout.contains("generation 1"), "stdout: {stdout}");
+    // Both event lines carry the generation, so `--json`-less consumers can
+    // still see it without waiting for a change.
+    assert_eq!(stdout.matches("gen=1").count(), 2, "stdout: {stdout}");
+}
+
+/// `--json` is a machine surface: the raw NDJSON lines already carry
+/// `bridge.epoch`, so the human-facing rebind notice must not be spliced into
+/// the stream where it would break a line-oriented parser.
+#[test]
+fn watch_json_stays_machine_clean_across_a_rebind() {
+    let path = temp_socket_path("watch-rebind-json");
+    let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(bridge_up_snapshot()));
+
+    let (code, stdout, stderr) = run_cli(path.clone(), true, Cmd::Watch);
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+    assert!(!stdout.contains("** rebind:"), "stdout: {stdout}");
+    for line in stdout.lines() {
+        let parsed: ServerMessage = serde_json::from_str(line).expect("every watch --json line parses");
+        match parsed {
+            ServerMessage::Event { event: EventBody::Snapshot { snapshot }, .. } => {
+                assert_eq!(snapshot.bridge.epoch, 1, "the generation rides the raw line");
+            }
+            other => panic!("expected an Event, got {other:?}"),
+        }
+    }
 }
 
 #[test]

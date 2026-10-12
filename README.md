@@ -21,6 +21,10 @@ A###/W### doc space, agent context) but its tickets surface on the **noisetable 
   model; the brain/face split in W001 supersedes its tray-app framing), test strategy.
 - **`.yah/quests.md`** — the roadmap epic + M0–M5 tickets (live on the noisetable board).
 - **`prototype/`** — the working shell PoC = executable spec for the data plane. Port to Rust.
+- **`.yah/docs/working/W002-ipauro-atmos-hdmi-plan.md`** — object-audio sink track: live Dolby Atmos
+  objects to an AVR over HDMI (DAW/ADM-OSC → IPAuRo → IEC 61937 → HDMI). Evidence in **A005**; tools in
+  `crates/ipauro-iec61937` (`mat-inspect`), `crates/ipauro-hdmi` (`hdmi-probe`,
+  `hdmi-passthrough-test`), `crates/ipauro-spatial`.
 
 ## TL;DR architecture
 - **Brain service (Rust, unprivileged, launchd/systemd-managed):** the product core —
@@ -35,6 +39,24 @@ A###/W### doc space, agent context) but its tickets surface on the **noisetable 
 - **Control plane (iroh)** = identity/membership/topology/addressing; **data plane
   (`if_bridge` + `pf` anchors, later NetworkExtension)** = the actual transport. Protocol
   registry + transport-policy engine generalize "prefer the good wire" beyond Link.
+
+## Tests
+
+IPAuRo's two planes have very different testability, so the suite is tiered by what each
+tier can honestly reach (full rationale in `W001` §9):
+
+| Tier | What it covers | How to run |
+|---|---|---|
+| **Control plane** — hardware-free, containerized | `ioreg`/`ifconfig`/`netstat` parsing against captured fixtures, the desired-state reconciler, the IPC protocol, mesh gossip/topology/routing/election | `./scripts/ci-control-plane.sh` |
+| **Full workspace** — macOS, still no hardware | the above plus the XPC FFI, the tray UI, and the helper's `pf`/bridge/DHCP rule generation (macOS-only by design — see `W002`) | `cargo test --workspace` |
+| **L2 / multicast** — macOS VMs on a virtual switch | bridge flooding, host multicast egress, `pf`-forces-onto-interface | R009-T2 (not built yet) |
+| **Physical / security reality** — bench runbook | USB data-role negotiation, cable quality, accessory approval, Local Network privacy | R009-T3 (ships as *detection*, not CI) |
+
+`scripts/ci-control-plane.sh` reads the workspace member list from `Cargo.toml` and requires
+every crate to be classified as either container-testable or macOS-only-with-a-reason, so a
+new crate cannot silently escape CI. `--list` prints that classification, `--native` runs the
+same crate set without Docker, and `--verify-exclusions` asserts each macOS-only crate really
+still is one. GitHub Actions runs all three (`.github/workflows/ci.yml`).
 
 ## First build target (de-risk the spine)
 `M0`: minimal brain service + `SMAppService` helper + IPC CLI client that creates/destroys a

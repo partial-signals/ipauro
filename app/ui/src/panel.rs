@@ -11,25 +11,71 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use eframe::egui::{self, Color32, Ui};
 use ipauro_proto::ipc::Command;
 
-use crate::state::{ConnState, StatusLine};
-use crate::viewmodel::{panel_view_model, status_line_view_model};
+use crate::state::{ConnState, RebindWatch, StatusLine};
+use crate::viewmodel::{panel_view_model, rebind_view_model, status_line_view_model};
 
 /// Color for an error-flagged status line — a muted red, distinguishable
 /// from ordinary text without shouting.
 const ERROR_COLOR: Color32 = Color32::from_rgb(214, 69, 69);
+/// Color for the rebind callout — amber, not red: nothing is broken in the
+/// service, there is one thing for the operator to do.
+const WARN_COLOR: Color32 = Color32::from_rgb(255, 159, 10);
 
-pub fn show(ui: &mut Ui, conn: &ConnState, status: &StatusLine, commands: &Sender<Command>) {
+/// What the panel needs the app to do that isn't a service [`Command`].
+/// Returned rather than applied in place so `panel.rs` keeps taking shared
+/// references and stays a pure function of the state it's handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PanelOutcome {
+    /// The operator dismissed the rebind callout this frame.
+    pub rebind_dismissed: bool,
+}
+
+pub fn show(
+    ui: &mut Ui,
+    conn: &ConnState,
+    status: &StatusLine,
+    rebind: &RebindWatch,
+    commands: &Sender<Command>,
+) -> PanelOutcome {
+    let mut outcome = PanelOutcome::default();
     egui::CentralPanel::default().show(ui, |ui| {
         match conn.snapshot() {
             None => show_not_running(ui),
             Some(snapshot) => {
                 let now_unix = now_unix();
                 let vm = panel_view_model(snapshot, now_unix);
+                ui.heading("IPAuRo");
+                ui.separator();
+                outcome.rebind_dismissed = show_rebind_callout(ui, rebind);
                 show_status(ui, &vm, commands);
             }
         }
         show_status_line(ui, status);
     });
+    outcome
+}
+
+/// The latched "the bridge was rebuilt under you" callout, above everything
+/// else because it's the one thing on this panel that needs the operator to
+/// act. Returns whether they dismissed it.
+///
+/// Deliberately not shown on the "service not running" screen: the recovery
+/// is "rejoin the new bridge", and with no service there is no bridge to
+/// rejoin yet — that screen's own message is the more actionable one. The
+/// latch survives regardless (see [`RebindWatch`]), so the callout is back as
+/// soon as a snapshot is.
+fn show_rebind_callout(ui: &mut Ui, rebind: &RebindWatch) -> bool {
+    let Some(vm) = rebind_view_model(rebind) else { return false };
+    let mut dismissed = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new(vm.text).color(WARN_COLOR).strong());
+        ui.label(egui::RichText::new(vm.action).color(WARN_COLOR));
+        if ui.button(vm.dismiss_label).clicked() {
+            dismissed = true;
+        }
+    });
+    ui.add_space(8.0);
+    dismissed
 }
 
 fn show_not_running(ui: &mut Ui) {
@@ -40,10 +86,10 @@ fn show_not_running(ui: &mut Ui) {
     });
 }
 
+/// The status rows themselves. The panel's heading, separator and rebind
+/// callout are rendered by [`show`] above this — they're panel chrome, not
+/// snapshot rows.
 fn show_status(ui: &mut Ui, vm: &crate::viewmodel::PanelViewModel, commands: &Sender<Command>) {
-    ui.heading("IPAuRo");
-    ui.separator();
-
     ui.label(egui::RichText::new("Service").strong());
     ui.label(&vm.service_line);
     ui.add_space(8.0);

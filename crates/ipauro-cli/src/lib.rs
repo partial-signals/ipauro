@@ -156,7 +156,9 @@ pub fn run(cli: Cli, out: &mut dyn Write, err_out: &mut dyn Write) -> i32 {
             }
             EXIT_OK
         }
-        Cmd::Watch => client::watch_loop(&mut reader, cli.json, out, err_out),
+        // The Hello snapshot's generation is the baseline: it is what an app
+        // connecting right now would have bound its sockets at.
+        Cmd::Watch => client::watch_loop(&mut reader, cli.json, snapshot.bridge.epoch, out, err_out),
         Cmd::Bridge { action } => {
             let command = match action {
                 BridgeAction::Up => Command::BridgeUp,

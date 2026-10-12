@@ -1,0 +1,107 @@
+# IPAuRo CI (R009-T1).
+#
+# Two tiers, because IPAuRo's two planes have different testability:
+#
+#   control-plane  — every hardware-free crate, in a pinned Linux container. This
+#                    is the gate: it runs on every push and must stay green.
+#   macos          — the full workspace on a macOS runner. Covers the crates the
+#                    container cannot build at all: the XPC FFI, the tray UI, and
+#                    the privileged helper with its pf/bridge/DHCP rule generation.
+#                    That last one is macOS-only by design rather than by accident
+#                    — W002 classifies pf/ifconfig/bootpd as "not portable, and not
+#                    worth making so", and the Linux agent (R011-F2) emits nftables
+#                    from its own executor — so rule-generation coverage lives here
+#                    permanently, not until someone gets around to porting it.
+#                    Still no hardware: nothing here plugs a cable or makes a bridge.
+#
+# What CI deliberately does NOT cover, and why, is in
+# .yah/docs/working/W001-ipauro-plan.md §9: L2 bridging and multicast flooding need
+# macOS VMs on a virtual switch (R009-T2), and USB data-role negotiation, cable
+# quality, accessory approval and Local Network privacy are physical/security
+# reality that ships as *detection*, not as CI (R009-T3).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with scripts/ci-control-plane.sh and the macOS job's toolchain.
+  RUST_IMAGE: rust:1.97.0-bookworm
+
+jobs:
+  control-plane:
+    name: control plane (container)
+    runs-on: ubuntu-latest
+    container: rust:1.97.0-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: control-plane-${{ hashFiles('Cargo.lock') }}
+          restore-keys: control-plane-
+
+      # The job already *is* the pinned container, so run the crate set natively
+      # inside it rather than nesting docker-in-docker. The classification (which
+      # crates are hardware-free, and why each exclusion exists) is the script's,
+      # so the workflow and a developer's laptop can never disagree about scope.
+      - name: Classification
+        run: ./scripts/ci-control-plane.sh --list
+
+      - name: Test
+        run: ./scripts/ci-control-plane.sh --native
+
+      - name: Format
+        run: cargo fmt --check || echo "::warning::rustfmt differences (not gating)"
+
+  macos:
+    name: full workspace (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same compiler as the container job. Pinning one side only would mean a
+      # macOS-job failure could always be "the runner moved", which is exactly the
+      # ambiguity the container pin exists to remove.
+      - name: Pin toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal && rustup default 1.97.0
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-
+
+      # `--workspace` here is the point: it picks up ipauro-xpc, app/helper and
+      # app/ui, i.e. exactly the crates control-plane cannot reach. Hardware-bound
+      # cases are `#[ignore]`d at the source (see discovery.rs's
+      # `real_machine_identification_holds_its_invariants`) and stay skipped.
+      - name: Test
+        run: cargo test --locked --workspace
+
+  exclusions-still-hold:
+    name: macOS-only exclusions still hold
+    runs-on: ubuntu-latest
+    # Advisory, not a gate: this asserts the *negative* — that every crate the
+    # control-plane job skips genuinely cannot build on Linux. A crate that has
+    # quietly become portable should be promoted into the container job, but
+    # discovering that should not redden an unrelated PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify
+        run: ./scripts/ci-control-plane.sh --verify-exclusions --image=${{ env.RUST_IMAGE }}
