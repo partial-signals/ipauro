@@ -377,6 +377,9 @@ member unplug tore down the whole bridge.
   IPAuRo), and, candidate, an **inferno-based Dante plugin** (R010-F8) replacing Dante Virtual
   Soundcard — inferno is Linux-only today, so its first home may be a cheap Linux node acting as
   the mesh's Dante gateway.
+  **Atmos-over-HDMI object sink** (W002, evidence A005): the same plugin shape for an AVR's Dolby
+  Atmos renderer, fed from ADM-OSC / canonical `Object` streams. Its encoders are portable Rust, its
+  transports per-OS, and its Plan B is the same cheap-Linux-gateway-node pattern.
 - **Protocol evolution — IPAuRo makes a new protocol survivable.** Two patterns fall out, and
   together they're the generative half of the product:
   - **Superset / "Link++" (no transcode):** a node speaks a backward-compatible *extension* of an

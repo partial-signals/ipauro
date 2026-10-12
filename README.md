@@ -21,6 +21,10 @@ A###/W### doc space, agent context) but its tickets surface on the **noisetable 
   model; the brain/face split in W001 supersedes its tray-app framing), test strategy.
 - **`.yah/quests.md`** — the roadmap epic + M0–M5 tickets (live on the noisetable board).
 - **`prototype/`** — the working shell PoC = executable spec for the data plane. Port to Rust.
+- **`.yah/docs/working/W002-ipauro-atmos-hdmi-plan.md`** — object-audio sink track: live Dolby Atmos
+  objects to an AVR over HDMI (DAW/ADM-OSC → IPAuRo → IEC 61937 → HDMI). Evidence in **A005**; tools in
+  `crates/ipauro-iec61937` (`mat-inspect`), `crates/ipauro-hdmi` (`hdmi-probe`,
+  `hdmi-passthrough-test`), `crates/ipauro-spatial`.
 
 ## TL;DR architecture
 - **Brain service (Rust, unprivileged, launchd/systemd-managed):** the product core —

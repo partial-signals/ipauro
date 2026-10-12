@@ -1,0 +1,23 @@
+[package]
+name = "ipauro-iec61937"
+description = "IEC 61937 data-burst framing (AC-3, E-AC-3, MAT/TrueHD), elementary-stream header parsing, and burst-stream inspection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+# Only the inspection CLI (src/bin/mat-inspect.rs) uses these; they are
+# small and already in the workspace graph, so they are not feature-gated.
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[[bin]]
+name = "mat-inspect"
+path = "src/bin/mat-inspect.rs"
