@@ -43,7 +43,7 @@ impl TransportKind {
 
 /// Measured properties of a link, refreshed from keepalive RTTs (the ch. 03 §4.2
 /// quality metric) and gossiped so every node can weight edges the same way.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct LinkQuality {
     pub rtt_us: u32,
     pub jitter_us: u32,

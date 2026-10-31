@@ -262,6 +262,9 @@ mod tests {
         fn is_serving(&self) -> bool {
             false
         }
+        fn leases(&self) -> Vec<ipauro_proto::helper::DhcpLease> {
+            Vec::new()
+        }
     }
 
     impl BridgeExecutor for Spy {
@@ -289,6 +292,18 @@ mod tests {
         }
         fn address_prefix(&self) -> anyhow::Result<Option<u8>> {
             unreachable!("teardown never queries address_prefix")
+        }
+        fn aliases(&self, _iface: &str) -> anyhow::Result<Vec<std::net::IpAddr>> {
+            unreachable!("teardown never queries aliases (DestroyBridge drops them)")
+        }
+        fn add_alias(&self, _iface: &str, _addr: std::net::IpAddr, _prefix: u8) -> anyhow::Result<()> {
+            unreachable!("teardown never adds aliases")
+        }
+        fn remove_alias(&self, _iface: &str, _addr: std::net::IpAddr) -> anyhow::Result<()> {
+            unreachable!("teardown never removes aliases individually")
+        }
+        fn uplink_candidates(&self) -> anyhow::Result<Vec<String>> {
+            unreachable!("teardown never enumerates uplinks")
         }
     }
 

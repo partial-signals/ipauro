@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 ipauro-proto = { workspace = true }
+ipauro-iroh = { path = "../ipauro-iroh" }
+ipauro-mesh = { path = "../ipauro-mesh" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }

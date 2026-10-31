@@ -1,0 +1,16 @@
+[package]
+name = "ipauro-vmlab"
+description = "macOS-VM L2 test tier (R009-T2): socket-attached segments, emulated peers, bridge/pf cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+if-addrs = "0.13"
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }

@@ -15,8 +15,11 @@
 #                    Still no hardware: nothing here plugs a cable or makes a bridge.
 #
 # What CI deliberately does NOT cover, and why, is in
-# .yah/docs/working/W001-ipauro-plan.md §9: L2 bridging and multicast flooding need
-# macOS VMs on a virtual switch (R009-T2), and USB data-role negotiation, cable
+# .yah/docs/working/W001-ipauro-plan.md §9: L2 bridging, multicast flooding and pf
+# scoping run against a real macOS guest via ./scripts/vm-l2.sh (R009-T2) — it needs a
+# host that can boot Virtualization.framework guests under lima, so it is not wired
+# into this workflow (crates/ipauro-vmlab's unit tests DO run in the container job).
+# USB data-role negotiation, cable
 # quality, accessory approval and Local Network privacy are physical/security
 # reality that ships as *detection*, not as CI (R009-T3).
 

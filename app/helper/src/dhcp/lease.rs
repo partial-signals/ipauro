@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use ipauro_proto::helper::DhcpLease;
+
 pub struct LeaseTable {
     pool_start: u32,
     pool_end: u32,
@@ -47,6 +49,19 @@ impl LeaseTable {
 
     fn is_taken(&self, addr_bits: u32) -> bool {
         self.leases.values().any(|v| u32::from(*v) == addr_bits)
+    }
+
+    /// Every lease held by an Ethernet (6-byte) hardware address, sorted by
+    /// address — what the Report carries to core (R003-F6). Other hardware
+    /// types have no MAC to key a mesh foreign leaf on and are omitted.
+    pub fn snapshot(&self) -> Vec<DhcpLease> {
+        let mut v: Vec<DhcpLease> = self
+            .leases
+            .iter()
+            .filter_map(|(hw, ip)| Some(DhcpLease { mac: hw.as_slice().try_into().ok()?, ipv4: *ip }))
+            .collect();
+        v.sort_by_key(|l| l.ipv4);
+        v
     }
 
     /// Free `client`'s lease, if any (DHCPRELEASE — `responder::handle_packet`).
@@ -112,6 +127,16 @@ mod tests {
         assert!(leases.allocate(&[2], None).is_some());
         assert!(leases.allocate(&[3], None).is_some());
         assert_eq!(leases.allocate(&[4], None), None);
+    }
+
+    #[test]
+    fn snapshot_reports_ethernet_leases_sorted_by_address() {
+        let mut leases = pool();
+        let b = leases.allocate(&[2, 0, 0, 0, 0, 2], None).unwrap();
+        let a = leases.allocate(&[2, 0, 0, 0, 0, 1], Some(Ipv4Addr::new(10, 69, 0, 12))).unwrap();
+        leases.allocate(&[9; 16], None).unwrap(); // non-Ethernet hw: no MAC
+        let s = leases.snapshot();
+        assert_eq!(s, vec![DhcpLease { mac: [2, 0, 0, 0, 0, 2], ipv4: b }, DhcpLease { mac: [2, 0, 0, 0, 0, 1], ipv4: a }]);
     }
 
     #[test]

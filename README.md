@@ -49,7 +49,7 @@ tier can honestly reach (full rationale in `W001` §9):
 |---|---|---|
 | **Control plane** — hardware-free, containerized | `ioreg`/`ifconfig`/`netstat` parsing against captured fixtures, the desired-state reconciler, the IPC protocol, mesh gossip/topology/routing/election | `./scripts/ci-control-plane.sh` |
 | **Full workspace** — macOS, still no hardware | the above plus the XPC FFI, the tray UI, and the helper's `pf`/bridge/DHCP rule generation (macOS-only by design — see `W002`) | `cargo test --workspace` |
-| **L2 / multicast** — macOS VMs on a virtual switch | bridge flooding, host multicast egress, `pf`-forces-onto-interface | R009-T2 (not built yet) |
+| **L2 / multicast** — a real macOS guest (lima), segments observed from outside | bridge flooding, host multicast egress, the stateful-`pf` trap, the helper's real `ScopeUdp` forcing Link onto one interface, scope-on-bridge keeping forwarding | `./scripts/vm-l2.sh` (macOS host + lima ≥ 2.1; one-time setup in the script header) |
 | **Physical / security reality** — bench runbook | USB data-role negotiation, cable quality, accessory approval, Local Network privacy | R009-T3 (ships as *detection*, not CI) |
 
 `scripts/ci-control-plane.sh` reads the workspace member list from `Cargo.toml` and requires

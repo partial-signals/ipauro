@@ -6,7 +6,7 @@
 //! whole request before `executor`/`pf`/`dhcp` ever see it.
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// `^en[0-9]+$` — the shape of a USB-NCM (or any real) Ethernet interface
 /// name on macOS (A002 §5). Bridge members must match this; the bridge
@@ -100,6 +100,52 @@ pub fn netmask_hex_to_prefix(hex: &str) -> Option<u8> {
     netmask_to_prefix(Ipv4Addr::from(bits))
 }
 
+/// The one prefix length a mesh ULA alias is installed with: the ULA is a
+/// /64 on-link subnet (RFC 4193 + the NodeId-as-IID layout, A001 addressing).
+pub const ULA_ALIAS_PREFIX: u8 = 64;
+
+/// `fc00::/7` is the ULA block; ipauro only generates `fd00::/8` (the
+/// locally-assigned half, L bit set).
+pub fn is_ula(addr: Ipv6Addr) -> bool {
+    addr.octets()[0] == 0xfd
+}
+
+/// Whether `addr` is in the class a mesh alias may name. The same class gate
+/// applies to add AND remove so `RemoveAlias` can never strip a
+/// link-local, public, or otherwise foreign address.
+pub fn is_mesh_alias_class(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V6(a) => is_ula(a),
+        IpAddr::V4(a) => is_rfc1918(a),
+    }
+}
+
+/// Validate an `AddAlias` request: ULA at exactly /64, or RFC1918 IPv4
+/// at 8..=30 (same bounds as `SetBridgeAddress`).
+pub fn validate_alias_add(addr: IpAddr, prefix: u8) -> Result<(), String> {
+    match addr {
+        IpAddr::V6(a) => {
+            if !is_ula(a) {
+                return Err(format!("alias {a} is not a ULA (fd00::/8)"));
+            }
+            if prefix != ULA_ALIAS_PREFIX {
+                return Err(format!("ULA alias prefix must be /{ULA_ALIAS_PREFIX}, got /{prefix}"));
+            }
+            Ok(())
+        }
+        IpAddr::V4(a) => validate_bridge_address(a, prefix),
+    }
+}
+
+/// Validate a `RemoveAlias` request (class only; no prefix travels).
+pub fn validate_alias_remove(addr: IpAddr) -> Result<(), String> {
+    if is_mesh_alias_class(addr) {
+        Ok(())
+    } else {
+        Err(format!("{addr} is not a mesh alias address class (ULA or RFC1918)"))
+    }
+}
+
 /// Validate a `ServeDhcp` pool against the bridge's own subnet
 /// (`bridge_ipv4`/`bridge_prefix`, from `BridgeExecutor::address_prefix`):
 /// the caller-supplied `netmask` must match the bridge's actual netmask, and
@@ -136,6 +182,37 @@ pub fn validate_dhcp_pool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- mesh alias validation ----------------------------------------------
+
+    #[test]
+    fn alias_add_accepts_ula64_and_rfc1918() {
+        assert!(validate_alias_add("fd1b:5a70:a52::1".parse().unwrap(), 64).is_ok());
+        assert!(validate_alias_add("10.42.3.4".parse().unwrap(), 16).is_ok());
+    }
+
+    #[test]
+    fn alias_add_rejects_wrong_class_and_prefix() {
+        for (a, p) in [
+            ("fe80::1", 64),          // link-local
+            ("2001:db8::1", 64),      // public
+            ("fd1b:5a70:a52::1", 48), // ULA at wrong prefix
+            ("fd1b:5a70:a52::1", 128),
+            ("8.8.8.8", 24),  // public v4
+            ("10.42.3.4", 31), // prefix out of bounds
+            ("10.42.3.4", 4),
+        ] {
+            assert!(validate_alias_add(a.parse().unwrap(), p).is_err(), "{a}/{p} should be refused");
+        }
+    }
+
+    #[test]
+    fn alias_remove_is_class_gated() {
+        assert!(validate_alias_remove("fd00::1".parse().unwrap()).is_ok());
+        assert!(validate_alias_remove("192.168.1.1".parse().unwrap()).is_ok());
+        assert!(validate_alias_remove("fe80::1".parse().unwrap()).is_err());
+        assert!(validate_alias_remove("169.254.1.1".parse().unwrap()).is_err());
+    }
 
     // ---- member/iface name validation matrix ------------------------------
 

@@ -21,6 +21,7 @@ mod failopen;
 mod listener;
 mod netutil;
 mod pf;
+mod pf_console;
 mod request;
 use std::sync::Arc;
 
@@ -68,6 +69,11 @@ fn main() -> anyhow::Result<()> {
         log::warn!(" Any local process can drive this ROOT helper. Dev builds ONLY --");
         log::warn!(" never ship with this set.");
         log::warn!("================================================================");
+    }
+
+    // Dev/test-only: pf without XPC, for the macOS-VM L2 tier (R009-T2).
+    if std::env::args().nth(1).as_deref() == Some(pf_console::FLAG) {
+        return pf_console::run(insecure_dev);
     }
 
     let executors = Executors {

@@ -237,6 +237,7 @@ mod tests {
             helper: HelperState::NotRegistered,
             bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
             transport: Default::default(),
+            mesh: Default::default(),
         }
     }
 

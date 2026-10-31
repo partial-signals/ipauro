@@ -45,14 +45,14 @@ pub struct RouteRequest {
 }
 
 /// A planned path: the node sequence and the transport used at each hop.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Route {
     pub hops: Vec<Hop>,
     /// Total ranked cost (measured cost adjusted by service-order preference).
     pub cost: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Hop {
     pub from: NodeId,
     pub edge: Edge,

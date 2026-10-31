@@ -1,0 +1,18 @@
+# ipauro-bridge — the clock-domain bridge for a transcode leg (R010-F4).
+#
+# Media-plane companion to ipauro-mesh: the mesh plans a leg and names its
+# clock class (protocol::ClockBridge); this crate runs that leg's adaptive
+# clock controller — drift estimation, jitter-buffer depth, fill steering —
+# and drives a borrowed resampling kernel through the `Resampler` trait.
+[package]
+name = "ipauro-bridge"
+description = "Clock-domain bridge for Protocol-NAT legs: adaptive rate/jitter controller over a borrowed ASRC kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ipauro-mesh = { path = "../ipauro-mesh" }
+# The borrowed ASRC kernel (A004 §3), behind the `Resampler` trait.
+rubato = "5.0.1"

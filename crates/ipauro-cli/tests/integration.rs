@@ -32,6 +32,8 @@ fn hello_snapshot() -> Snapshot {
         helper: HelperState::Connected { version: "9.9.9-fake".into() },
         bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
         transport: Default::default(),
+        // The fake server's Hello always carries this; `status mesh` reads it.
+        mesh: ipauro_proto::state::MeshView { status: Some(mesh_status()), ..Default::default() },
     }
 }
 
@@ -167,7 +169,7 @@ fn status_prints_pretty_snapshot_from_hello() {
     let path = temp_socket_path("status");
     let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(hello_snapshot()));
 
-    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status);
+    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status { what: None });
     server.join().unwrap();
     let _ = std::fs::remove_file(&path);
 
@@ -184,7 +186,7 @@ fn status_json_passes_raw_hello_line_through() {
     let path = temp_socket_path("status-json");
     let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(hello_snapshot()));
 
-    let (code, stdout, stderr) = run_cli(path.clone(), true, Cmd::Status);
+    let (code, stdout, stderr) = run_cli(path.clone(), true, Cmd::Status { what: None });
     server.join().unwrap();
     let _ = std::fs::remove_file(&path);
 
@@ -306,7 +308,7 @@ fn version_mismatch_exits_3() {
     let path = temp_socket_path("version-mismatch");
     let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION + 1, ReplyPlan::Ok(hello_snapshot()));
 
-    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status);
+    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status { what: None });
     server.join().unwrap();
     let _ = std::fs::remove_file(&path);
 
@@ -320,10 +322,72 @@ fn connection_refused_exits_2_with_friendly_message() {
     // No server listening: exercise the "service not running" path directly.
     let path = temp_socket_path("no-server");
 
-    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status);
+    let (code, stdout, stderr) = run_cli(path.clone(), false, Cmd::Status { what: None });
 
     assert_eq!(code, EXIT_CONNECTION);
     assert!(stdout.is_empty());
     assert!(stderr.contains("not running"), "stderr: {stderr}");
     assert!(stderr.contains(&path.display().to_string()));
+}
+
+#[test]
+fn mesh_and_rate_subcommands_parse() {
+    use clap::Parser;
+    use ipauro_cli::{RateAction, StatusAction};
+    let c = Cli::try_parse_from(["ipauro", "status", "mesh"]).unwrap();
+    assert!(matches!(c.command, Cmd::Status { what: Some(StatusAction::Mesh) }));
+    let c = Cli::try_parse_from(["ipauro", "status"]).unwrap();
+    assert!(matches!(c.command, Cmd::Status { what: None }));
+    let c = Cli::try_parse_from(["ipauro", "rate", "propose", "96000"]).unwrap();
+    assert!(matches!(c.command, Cmd::Rate { action: RateAction::Propose { hz: 96_000 } }));
+    assert!(Cli::try_parse_from(["ipauro", "rate", "propose"]).is_err());
+    assert!(Cli::try_parse_from(["ipauro", "rate", "propose", "fast"]).is_err());
+}
+
+fn mesh_snapshot() -> Snapshot {
+    hello_snapshot()
+}
+
+fn mesh_status() -> ipauro_proto::state::MeshStatus {
+    use ipauro_proto::state::*;
+    MeshStatus {
+        version: MESH_STATUS_VERSION,
+        rate: MeshRateView { hz: 96_000, epoch: 1, author: "aa".into() },
+        blockages: vec![Blockage {
+            cause: BlockCause::IrohBindFailed { error: "in use".into() },
+            remedy: Remedy::RestartService,
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn status_mesh_prints_rate_and_blockages() {
+    let path = temp_socket_path("status-mesh");
+    let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(mesh_snapshot()));
+    let (code, stdout, stderr) = run_cli(
+        path.clone(),
+        false,
+        Cmd::Status { what: Some(ipauro_cli::StatusAction::Mesh) },
+    );
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
+    assert!(stdout.contains("rate: 96000 Hz (epoch 1"), "{stdout}");
+    assert!(stdout.contains("mesh endpoint failed to bind: in use"), "{stdout}");
+    assert!(stdout.contains("fix: free the port"), "{stdout}");
+}
+
+#[test]
+fn rate_propose_sends_the_command_and_prints_the_reply() {
+    let path = temp_socket_path("rate-propose");
+    let server = spawn_fake_server(path.clone(), PROTOCOL_VERSION, ReplyPlan::Ok(mesh_snapshot()));
+    let (code, _stdout, stderr) = run_cli(
+        path.clone(),
+        false,
+        Cmd::Rate { action: ipauro_cli::RateAction::Propose { hz: 96_000 } },
+    );
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(code, EXIT_OK, "stderr: {stderr}");
 }

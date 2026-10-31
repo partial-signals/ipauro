@@ -98,7 +98,110 @@ pub fn pretty_snapshot(snapshot: &Snapshot) -> String {
             "  dhcp        {}",
             if snapshot.transport.dhcp_serving { "serving" } else { "off" }
         ),
+        "mesh:".to_string(),
+        format!("  {}", pretty_roles(&snapshot.mesh).replace('\n', "\n  ")),
     ];
+    lines.join("\n")
+}
+
+/// `ipauro role get` / the status "mesh:" block.
+pub fn pretty_roles(mesh: &ipauro_proto::state::MeshView) -> String {
+    let name = |r: ipauro_proto::state::NodeRole| match r {
+        ipauro_proto::state::NodeRole::Hub => "hub",
+        ipauro_proto::state::NodeRole::Peer => "peer",
+    };
+    let mut lines = vec![format!("this node: {}", name(mesh.role))];
+    for p in &mesh.peers {
+        lines.push(format!("  {}  {}", p.node_id, name(p.role)));
+    }
+    lines.join("\n")
+}
+
+/// `ipauro status mesh`: members table, rate, bootstrap health, blockages.
+pub fn pretty_mesh_status(mesh: &ipauro_proto::state::MeshView) -> String {
+    use ipauro_proto::state::{BeaconStatus, EndpointStatus, Liveness, N0Status, NodeRole};
+    let Some(st) = &mesh.status else {
+        return "mesh status unavailable (service predates it or has not published one yet)".into();
+    };
+    let role = |r: NodeRole| match r {
+        NodeRole::Hub => "hub",
+        NodeRole::Peer => "peer",
+    };
+    let mut lines = Vec::new();
+    if !st.is_supported() {
+        lines.push(format!(
+            "note: service reports mesh status v{} (this client knows v{}); showing what is understood",
+            st.version,
+            ipauro_proto::state::MESH_STATUS_VERSION
+        ));
+    }
+    lines.push(match &st.self_node {
+        Some(id) => format!("node: {} (endpoint {})", id.node_id, id.endpoint_id),
+        None => "node: no mesh identity".to_string(),
+    });
+    lines.push(match &st.endpoint {
+        EndpointStatus::Bound { addrs } => format!("endpoint: bound on {}", addrs.join(", ")),
+        EndpointStatus::Failed { error } => format!("endpoint: FAILED ({error})"),
+        EndpointStatus::NotStarted => "endpoint: not started".to_string(),
+        EndpointStatus::Unknown => "endpoint: ?".to_string(),
+    });
+    lines.push(format!(
+        "rate: {} Hz (epoch {}{})",
+        st.rate.hz,
+        st.rate.epoch,
+        if st.rate.author.is_empty() { String::new() } else { format!(", proposed by {}", st.rate.author) }
+    ));
+    lines.push(match &st.bootstrap.beacon {
+        BeaconStatus::NotRunning => "beacon: not running".to_string(),
+        BeaconStatus::Up { iface } => format!("beacon: up on {iface}"),
+        BeaconStatus::Down { iface, cause } => {
+            let b = ipauro_proto::state::Blockage {
+                cause: cause.clone(),
+                remedy: ipauro_proto::state::Remedy::Unknown,
+            };
+            format!("beacon: down on {iface} ({})", b.cause_text())
+        }
+        BeaconStatus::Unknown => "beacon: ?".to_string(),
+    });
+    lines.push(format!(
+        "n0 discovery: {}",
+        match st.bootstrap.n0 {
+            N0Status::Off => "off",
+            N0Status::On => "on",
+            N0Status::Unknown => "?",
+        }
+    ));
+    lines.push(String::new());
+    lines.push("members:".to_string());
+    lines.push(format!("  {:<18} {:<5} {:<9} {:<8} {:<16} {}", "node", "role", "state", "seen", "ipv4", "ula"));
+    for m in &st.members {
+        let state = match m.liveness {
+            Liveness::Alive => "alive",
+            Liveness::Expiring => "expiring",
+            Liveness::Expired => "expired",
+            Liveness::Unknown => "?",
+        };
+        let seen = if m.is_self { "self".to_string() } else { format!("{}s+", m.last_seen_age_secs) };
+        lines.push(format!(
+            "  {:<18} {:<5} {:<9} {:<8} {:<16} {}",
+            m.node_id,
+            role(m.role),
+            state,
+            seen,
+            m.ipv4.as_deref().unwrap_or("-"),
+            m.ula.as_deref().unwrap_or("-"),
+        ));
+    }
+    lines.push(String::new());
+    if st.blockages.is_empty() {
+        lines.push("blockages: none".to_string());
+    } else {
+        lines.push("blockages:".to_string());
+        for b in &st.blockages {
+            lines.push(format!("  - {}", b.cause_text()));
+            lines.push(format!("      fix: {}", b.remedy_text()));
+        }
+    }
     lines.join("\n")
 }
 
@@ -163,6 +266,7 @@ pub fn error_code_str(code: ErrorCode) -> &'static str {
         ErrorCode::HelperRejected => "helper_rejected",
         ErrorCode::InvalidCommand => "invalid_command",
         ErrorCode::Internal => "internal",
+        ErrorCode::MeshUnavailable => "mesh_unavailable",
     }
 }
 
@@ -191,7 +295,68 @@ mod tests {
                 epoch: 1,
             },
             transport: Default::default(),
+            mesh: Default::default(),
         }
+    }
+
+    #[test]
+    fn pretty_roles_lists_self_then_peers() {
+        use ipauro_proto::state::{MeshPeer, MeshView, NodeRole};
+        let m = MeshView {
+            role: NodeRole::Peer,
+            peers: vec![MeshPeer { node_id: "0102030405060708".into(), role: NodeRole::Hub }],
+            status: None,
+        };
+        assert_eq!(pretty_roles(&m), "this node: peer\n  0102030405060708  hub");
+    }
+
+    #[test]
+    fn pretty_mesh_status_renders_members_rate_and_blockages() {
+        use ipauro_proto::state::*;
+        let mesh = MeshView {
+            role: NodeRole::Hub,
+            peers: vec![],
+            status: Some(MeshStatus {
+                version: MESH_STATUS_VERSION + 1,
+                self_node: Some(MeshIdentity { node_id: "aa".into(), endpoint_id: "ep".into() }),
+                members: vec![
+                    MeshMember {
+                        node_id: "aa".into(),
+                        is_self: true,
+                        role: NodeRole::Hub,
+                        ula: Some("fd00::1".into()),
+                        ipv4: Some("10.42.0.5".into()),
+                        addr_salt: 0,
+                        last_seen_age_secs: 0,
+                        liveness: Liveness::Alive,
+                        reachability: Reachability::Unknown,
+                    },
+                    MeshMember {
+                        node_id: "bb".into(),
+                        is_self: false,
+                        role: NodeRole::Peer,
+                        ula: None,
+                        ipv4: None,
+                        addr_salt: 0,
+                        last_seen_age_secs: 120,
+                        liveness: Liveness::Expired,
+                        reachability: Reachability::Unknown,
+                    },
+                ],
+                rate: MeshRateView { hz: 96_000, epoch: 3, author: "aa".into() },
+                blockages: vec![Blockage {
+                    cause: BlockCause::PeerExpired { node_id: "bb".into(), age_secs: 120 },
+                    remedy: Remedy::CheckPeer { node_id: "bb".into() },
+                }],
+                ..Default::default()
+            }),
+        };
+        let out = pretty_mesh_status(&mesh);
+        assert!(out.contains("this client knows v1"), "newer-version note: {out}");
+        assert!(out.contains("rate: 96000 Hz (epoch 3, proposed by aa)"));
+        assert!(out.contains("10.42.0.5") && out.contains("expired") && out.contains("120s+"));
+        assert!(out.contains("peer bb silent for 120s+") && out.contains("fix: check power"));
+        assert!(pretty_mesh_status(&MeshView::default()).contains("unavailable"));
     }
 
     #[test]

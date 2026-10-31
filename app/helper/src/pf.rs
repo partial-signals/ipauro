@@ -42,22 +42,39 @@
 //! is checked before every call, so in steady state this is a cheap read
 //! with no write and no reload.
 //!
-//! **Needs bench verification**: this sandbox has no root and the task
-//! forbids mutating live pf state here, so I could not load a rule and
-//! observe it actually bite. Flagged in the final report.
+//! **Verified to bite** in a real macOS 26.4 guest by the macOS-VM L2 tier
+//! (`crates/ipauro-vmlab`, case `pf-scope-forces-onto-interface`, R009-T2):
+//! the anchor point lands once on a stock pf.conf, a scope cuts an
+//! already-live Link-shaped session off the blocked interface, a session
+//! started afterwards never touches it, and `ClearScopes` restores it.
 //!
 //! ## Selective state invalidation
 //!
 //! A002's stateful-pf trap: pf checks the state table BEFORE the ruleset, so
 //! a flow established before a new block rule loads keeps flowing — the
-//! block only catches NEW packets. `pfctl -k <host>|<network>` (checked via
-//! `man pfctl`) only matches by host/network; macOS's pfctl has no port
-//! filter for state kill, which doesn't fit "any host, this port" scoping.
-//! The targeted alternative pfctl DOES support is interface restriction:
-//! `pfctl -F states -i <iface>`, applied per real non-loopback interface
-//! rather than one unrestricted `-F states` call. See [`flush_affected_states`].
+//! block only catches NEW packets. Restarting the app does NOT get around
+//! this for Link: its flows are fixed-port at both ends (`:20808 <->
+//! :20808`), so a "new" session has the identical 5-tuple and re-matches the
+//! surviving state — and the peer's own traffic keeps that state alive.
+//!
+//! The first version here flushed per interface (`pfctl -F states -i
+//! <iface>` over every interface). **That is a no-op for the states that
+//! matter**: macOS pf's default `state-policy` is `floating`, so states are
+//! bound to no interface (`pfctl -s states` prints them as `ALL udp ...`)
+//! and `-i` never matches them. Measured in the VM tier: the link-b states
+//! were byte-identical before and after the flush, and the scope did not
+//! bite on a live session OR on a restarted one.
+//!
+//! macOS's `pfctl -k` selects by host/network only — no port, no label. So
+//! the narrowest correct kill is: read `pfctl -s states`, collect the host
+//! PAIRS of every UDP state on a scoped port, and `-k a -k b` each pair (both
+//! directions; `-k` is directional). Collateral is bounded to other states
+//! between exactly those two hosts, which a stateful pass recreates on the
+//! next packet — versus a global `-F states`, which the PoC used and this
+//! module rejects because it hits every host pair on the machine. See
+//! [`invalidate_scoped_states`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::Mutex;
 
@@ -128,7 +145,11 @@ impl PfctlExecutor {
         let rules = generate_anchor_rules(&state.scopes);
         cmd::run_checked_with_stdin(PFCTL, &["-a", ANCHOR_NAME, "-f", "-"], &rules)
             .with_context(|| format!("loading rules into anchor {ANCHOR_NAME}"))?;
-        flush_affected_states()?;
+        // Only a TIGHTENING needs invalidation: a blocked packet never
+        // creates state, so after a clear (or a widened allow-list) every
+        // surviving state is one the new rules would pass anyway.
+        let ports: BTreeSet<u16> = state.scopes.keys().copied().collect();
+        invalidate_scoped_states(&ports)?;
         Ok(())
     }
 
@@ -254,16 +275,55 @@ fn ensure_anchor_point() -> Result<()> {
 }
 
 /// Selective state invalidation (A002's stateful-pf trap) — see module docs.
-/// Best-effort per interface: one interface's flush failing (e.g. it
-/// vanished mid-call) doesn't abort the others.
-fn flush_affected_states() -> Result<()> {
-    let ifaces = cmd::list_interfaces().context("listing interfaces to flush pf state")?;
-    for ifc in ifaces.iter().filter(|i| i.as_str() != "lo0") {
-        if let Err(e) = cmd::run_checked(PFCTL, &["-F", "states", "-i", ifc]) {
-            log::warn!("flushing pf states on {ifc} failed (continuing): {e:#}");
+/// Reading the table is fatal on failure (a scope we cannot make bite must
+/// not report success); each pair kill is best-effort, since a state that
+/// expired between the read and the kill is exactly the outcome we wanted.
+fn invalidate_scoped_states(ports: &BTreeSet<u16>) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let out = cmd::run_checked(PFCTL, &["-s", "states"]).context("pfctl -s states (finding states to invalidate)")?;
+    for (a, b) in host_pairs_on_udp_ports(&String::from_utf8_lossy(&out.stdout), ports) {
+        for (from, to) in [(&a, &b), (&b, &a)] {
+            if let Err(e) = cmd::run_checked(PFCTL, &["-k", from, "-k", to]) {
+                log::warn!("killing pf states {from} -> {to} failed (continuing): {e:#}");
+            }
         }
     }
     Ok(())
+}
+
+/// One `pfctl -s states` endpoint (`10.70.2.1:20808`, or IPv6 as
+/// `fe80::1[20808]`) split into host and port.
+fn split_endpoint(tok: &str) -> Option<(&str, u16)> {
+    let (host, port) = match tok.strip_suffix(']') {
+        Some(v6) => v6.rsplit_once('[')?,
+        None => tok.rsplit_once(':')?,
+    };
+    Some((host, port.parse().ok()?))
+}
+
+/// The distinct host pairs of every UDP state with either end on a port in
+/// `ports`. Line shape (macOS 26, measured):
+/// `ALL udp 10.70.2.1:20808 <- 10.70.2.2:20808       MULTIPLE:MULTIPLE`;
+/// a NAT'd state carries a parenthesised original after the first endpoint,
+/// which is skipped — the kill targets the real ends.
+fn host_pairs_on_udp_ports(states: &str, ports: &BTreeSet<u16>) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for line in states.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let Some(arrow) = toks.iter().position(|t| *t == "->" || *t == "<-") else { continue };
+        if toks.get(1) != Some(&"udp") || arrow < 3 {
+            continue;
+        }
+        let (Some(left), Some(right)) = (split_endpoint(toks[2]), toks.get(arrow + 1).and_then(|t| split_endpoint(t))) else {
+            continue;
+        };
+        if ports.contains(&left.1) || ports.contains(&right.1) {
+            pairs.insert((left.0.to_string(), right.0.to_string()));
+        }
+    }
+    pairs
 }
 
 /// Parse `pfctl -E`'s reference-token line (observed real-world format:
@@ -360,6 +420,54 @@ load anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\"
     #[test]
     fn stock_pf_conf_needs_the_anchor_point() {
         assert!(pf_conf_needs_anchor_point(STOCK_PF_CONF));
+    }
+
+    // ---- state invalidation (verbatim `pfctl -s states`, macOS 26.4 VM) ----
+
+    /// The two link-b lines captured by ipauro-vmlab's
+    /// `pf-scope-forces-onto-interface` — floating (`ALL`) states that the
+    /// old `-F states -i <iface>` flush left untouched — plus lines that must
+    /// NOT be selected.
+    const STATES: &str = "\
+ALL udp 224.76.78.75:20808 <- 10.70.2.2:20808       NO_TRAFFIC:SINGLE
+ALL udp 10.70.2.1:20808 <- 10.70.2.2:20808       MULTIPLE:MULTIPLE
+ALL tcp 192.168.5.15:22 <- 192.168.5.2:51234       ESTABLISHED:ESTABLISHED
+ALL udp 192.168.5.15:5353 -> 224.0.0.251:5353       SINGLE:NO_TRAFFIC
+ALL udp 10.0.0.5:51000 (192.168.1.9:40000) -> 10.0.0.9:20808       MULTIPLE:SINGLE
+ALL udp fe80::1[20808] -> ff12::8080[20808]       SINGLE:NO_TRAFFIC
+";
+
+    fn pairs(ports: &[u16]) -> Vec<(String, String)> {
+        host_pairs_on_udp_ports(STATES, &ports.iter().copied().collect()).into_iter().collect()
+    }
+
+    #[test]
+    fn selects_the_floating_link_states_and_nothing_else() {
+        let got = pairs(&[20808]);
+        let want: Vec<(String, String)> = [
+            ("10.0.0.5", "10.0.0.9"),
+            ("10.70.2.1", "10.70.2.2"),
+            ("224.76.78.75", "10.70.2.2"),
+            ("fe80::1", "ff12::8080"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(got, want, "ssh (tcp) and mDNS (another port) must survive a Link scope");
+    }
+
+    #[test]
+    fn no_scoped_ports_selects_nothing() {
+        assert!(pairs(&[]).is_empty());
+        assert!(pairs(&[30000]).is_empty());
+    }
+
+    #[test]
+    fn endpoints_split_for_both_address_families() {
+        assert_eq!(split_endpoint("10.70.2.1:20808"), Some(("10.70.2.1", 20808)));
+        assert_eq!(split_endpoint("fe80::1[20808]"), Some(("fe80::1", 20808)));
+        assert_eq!(split_endpoint("(192.168.1.9:40000)"), None, "a NAT original is not an endpoint");
+        assert_eq!(split_endpoint("garbage"), None);
     }
 
     #[test]

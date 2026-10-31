@@ -53,7 +53,17 @@ classify() {
     crates/ipauro-core)   echo "container" ;;
     crates/ipauro-cli)    echo "container" ;;
     crates/ipauro-mesh)   echo "container" ;;
+    crates/ipauro-bridge) echo "container" ;;
     crates/ipauro-probe)  echo "container" ;;
+    # Its unit tests (frame codec, qemu framing, segment/peer over a real unix
+    # socket, ifconfig parsing) are portable; the VM run itself is
+    # scripts/vm-l2.sh, a separate tier that needs a macOS host + lima.
+    crates/ipauro-vmlab)  echo "container" ;;
+    crates/ipauro-iroh)  echo "container" ;;
+    crates/ipauro-iec61937) echo "container" ;;
+    # Core Audio FFI is cfg(target_os = "macos")-gated; the probe has Linux arms.
+    crates/ipauro-hdmi)   echo "container" ;;
+    crates/ipauro-spatial) echo "container" ;;
     crates/ipauro-xpc)    echo "macos:hand-rolled FFI over Apple's C XPC API; no non-Apple implementation exists" ;;
     app/helper)           echo "macos:depends on ipauro-xpc + block2 -> objc2, which refuses to compile off Apple platforms. Its pf/bridge/DHCP rule generation is macOS-only BY DESIGN, not by accident: W002 classifies pf/ifconfig/bootpd as 'not portable, and not worth making so', and the Linux agent (R011-F2) generates nftables rules from its own executor rather than sharing this one. So this crate's tests belong on the macOS job, and there is nothing here to lift into the container." ;;
     app/ui)               echo "macos:eframe + tray-icon; a GUI client is out of scope for headless CI regardless of platform" ;;

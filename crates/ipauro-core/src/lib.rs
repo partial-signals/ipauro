@@ -10,16 +10,20 @@
 //! [`registrar::HelperRegistrar`]) is injected via [`ServiceConfig`] — see
 //! `main.rs` for the one-line seam where the real XPC implementation plugs in.
 
+pub mod addressing;
 pub mod commands;
 pub mod discovery;
 pub mod helper_channel;
 pub mod helper_link;
+pub mod mesh_status;
 pub mod reconcile;
+pub mod role;
 pub mod registrar;
 #[cfg(target_os = "macos")]
 pub mod registrar_smapp;
 pub mod server;
 pub mod state_store;
+pub mod stream_server;
 pub mod watch;
 #[cfg(target_os = "macos")]
 pub mod xpc_helper;
@@ -47,6 +51,12 @@ pub struct ServiceConfig {
     pub helper: Arc<dyn HelperChannel>,
     pub registrar: Arc<dyn HelperRegistrar>,
     pub usb_source: Arc<dyn UsbNcmSource>,
+    /// This node's mesh identity, when the iroh node is up (R003-F1); enables
+    /// the primary-address reconcile step (R003-T3). `None` = M1-only.
+    pub mesh_node: Option<ipauro_mesh::ids::NodeId>,
+    /// The running gossip membership (R003-F2), when up: role and member set
+    /// are exchanged through it (R003-F4).
+    pub membership: Option<Arc<ipauro_iroh::MeshMembership>>,
 }
 
 /// This build's full version identity — the workspace package version plus
@@ -83,6 +93,7 @@ pub fn initial_snapshot() -> Snapshot {
         helper: HelperState::NotRegistered,
         bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
         transport: Default::default(),
+        mesh: Default::default(),
     }
 }
 
@@ -91,7 +102,42 @@ pub fn initial_snapshot() -> Snapshot {
 /// in tests that instead just let the runtime drop the task). Cleans up the
 /// socket file on the way out.
 pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
+    serve_with(config, mesh_status::MeshEnv::default(), shutdown).await
+}
+
+/// [`serve`] plus the mesh bring-up facts `main` alone knows (endpoint id,
+/// bind failures, the beacon handle), which feed the mesh status section
+/// (R003-T5).
+pub async fn serve_with(
+    config: ServiceConfig,
+    mesh_env: mesh_status::MeshEnv,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
     let store = Arc::new(StateStore::new(initial_snapshot()));
+    // The elected role survives restarts (R003-F4); everything else in the
+    // desired state stays per-instance, as in M1.
+    let role_file = role::role_path(&config.socket_path);
+    store.set_role_path(role_file.clone());
+    let persisted_role = role::load(&role_file);
+    store.mutate(|s| s.mesh.role = persisted_role).await;
+    if let Some(node) = config.mesh_node {
+        // Env var shared with the gossip layer's mesh id (main.rs): meshes with
+        // distinct ids get distinct ULA Global IDs; unset = the fixed constant.
+        let ula = match std::env::var("IPAURO_MESH_ID") {
+            Ok(id) => ipauro_mesh::addressing::UlaPrefix::from_mesh_id(id.as_bytes()),
+            Err(_) => ipauro_mesh::addressing::UlaPrefix::DEFAULT,
+        };
+        match addressing::MeshAddressing::appliance(node, ula) {
+            Ok(a) => store.set_mesh_addressing(a),
+            Err(e) => log::error!("mesh addressing refused at config time: {e}"),
+        }
+    }
+    if let Some(m) = &config.membership {
+        store.set_mesh_control(m.clone());
+    }
+    // Publish the first status BEFORE the server accepts anyone: a client's
+    // Hello already carries it, and no spurious "status appeared" event fires.
+    mesh_status::sync_once(&store, &mesh_env, config.membership.as_deref()).await;
     let reconcile_kick = Arc::new(Notify::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -112,6 +158,14 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
         reconcile_kick.clone(),
         shutdown_tx.subscribe(),
     ));
+    // Runs even without a membership: a failed bring-up is itself status.
+    let sync_task = Some(tokio::spawn(mesh_status::run_sync(
+        store.clone(),
+        mesh_env,
+        config.membership.clone(),
+        reconcile_kick.clone(),
+        shutdown_tx.subscribe(),
+    )));
     // Fast-path watch: kicks `reconcile_kick` on any USB-NCM interface change
     // (replug), well inside the 15s poll backstop `reconcile::run` already
     // provides on its own — see `watch`'s module docs for the mechanism
@@ -168,6 +222,11 @@ pub async fn serve(config: ServiceConfig, shutdown: impl Future<Output = ()>) ->
     let _ = shutdown_tx.send(());
     let _ = reconcile_task.await;
     let _ = watch_task.await;
+    // Holds an Arc<MeshMembership>: main shuts the membership down via
+    // `Arc::into_inner`, which needs this clone gone.
+    if let Some(t) = sync_task {
+        let _ = t.await;
+    }
 
     match server_result {
         Ok(inner) => inner,

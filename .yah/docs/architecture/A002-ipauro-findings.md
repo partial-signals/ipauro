@@ -4,15 +4,29 @@
 @yah:status(open)
 @yah:phase(P5)
 @yah:parent(R009)
+@yah:gotcha("Two of this ticket's named cases ALREADY EXIST as VM-tier cases in crates/ipauro-vmlab (R009-T2): stateful-pf-survival = `pf-stateful-trap` + `pf-scope-forces-onto-interface`, and bridge-host-egress = `bridge-host-multicast-egress`. Run them with ./scripts/vm-l2.sh, and map them in the suite instead of re-implementing them. The VM tier canNOT reach cable-dead, charge-only, unapproved-accessory, link-local-flap (USB/configd), or member-unplug-blast-radius, because a lima socket NIC cannot be hot-removed like a USB gadget. Those are runbook or fixture cases. Also see the new A002 section 'pf states are FLOATING': a restarted Link session re-matches surviving state, so the runbook's pf step must check `pfctl -s states`, not just restart the app.")
 -->
 
 <!--
 @yah:ticket(R009-T2, "macOS-VM virtual-switch L2 tests: bridge flooding, host multicast egress, pf-forces-onto-interface — ALWAYS verify by teardown-and-re-establish (stateful-pf discipline)")
-@yah:at(2026-06-28T03:09:36Z)
-@yah:status(open)
+@yah:status(review)
+@yah:assignee(agent:bundle-anthropic-ashguard)
+@yah:at(2026-10-29T22:05:30Z)
 @yah:phase(P3)
 @yah:parent(R009)
 @yah:gotcha("Apple licensing caps macOS VMs at 2 per virtualization host — 2-node L2 behaviors virtualize fine; 4+-node meshes (R006-T5, R010-T5) belong to the hardware runbook, not this tier.")
+@yah:handoff("Built crates/ipauro-vmlab + scripts/vm-l2.sh. ONE real macOS 26.4 guest (lima template:macos-26, vz) is the device under test; its two extra NICs are lima `socket:` networks whose unix sockets the harness owns (qemu stream framing, confirmed from limactl's DialQemu/qemuPacketConn symbols and by live traffic). Wire observations come from OUTSIDE the guest kernel; the other hosts are emulated peers (MAC/IP/ARP/Link-shaped beacon), so Apple's 2-VM cap never binds. The same binary runs in-guest as a Link-shaped endpoint (one socket per iface on :20808, multicast+unicast, group joined per iface). Guest NICs are found by fixed MAC: they came up as en3/en2, not en1/en2.")
+@yah:handoff("pf cases drive the REAL helper PfctlExecutor via new dev-only `ipauro-helper --pf-console` (app/helper/src/pf_console.rs; refuses without IPAURO_INSECURE_DEV=1; stdin EOF clears scopes). Five named cases, 27 checks: bridge-floods-member-multicast (built AND rebuilt), bridge-host-multicast-egress, pf-stateful-trap (reproduces A002's trap on purpose, as a negative control showing the harness can see it), pf-scope-forces-onto-interface (scope under a live session, then a fresh session, idempotent anchor point, clear restores), pf-scope-on-bridge-keeps-forwarding.")
+@yah:handoff("DISCOVERED + FIXED a shipped-helper bug (app/helper/src/pf.rs, R005 code, no live owner): ScopeUdp did NOT bite. flush_affected_states ran `pfctl -F states -i <iface>`, but macOS pf states are floating (`ALL udp ...`), so -i never matched them. The capture showed link-b states byte-identical before and after. Because Link is fixed-port on both ends, a restarted session re-matched the surviving state, so teardown-and-re-establish could not rescue it either. Replaced it with invalidate_scoped_states: parse `pfctl -s states` and kill the host pairs of UDP states on scoped ports, in both directions (-k is host-only on macOS). 3 parser tests use the verbatim captured lines. Shown non-vacuous: the same case failed 3 checks against the old flush. A002 gained a 'pf states are FLOATING' section, and pf.rs's 'needs bench verification' note is replaced with the VM evidence.")
+@yah:handoff("Also: lima 2.1.1 SIGTRAPs in StartGraphicApplication on every non-install start of a macOS instance, so the harness sets video.display=none (Lima::ensure_headless). The lima guest has no passwordless sudo, so Lima::ensure_sudo installs a guest-only sudoers drop-in from ~/password. The pf fixture is UDP-only, because a TCP stateful pass killed lima's mid-stream SSH (exit 255). Classified ipauro-vmlab/hdmi/iec61937/spatial in ci-control-plane.sh: all were unclassified, so the container gate was red. ipauro-iroh is R003's, and @Ashguard:griffin's courier is adding it. Docs: W001 section 9, README tier table, ci.yml header.")
+@yah:verify("./scripts/vm-l2.sh - 27 passed, 0 failed (3 consecutive full runs on the final code; VM left Stopped, NICs detached)")
+@yah:verify("cargo test -p ipauro-vmlab -p ipauro-helper - 13 + 129 green; cargo clippy --all-targets on both clean")
+@yah:verify("docker run rust:1.97.0-bookworm cargo test --locked -p ipauro-vmlab -p ipauro-iec61937 -p ipauro-hdmi -p ipauro-spatial - green on Linux")
+@yah:verify("Non-vacuity: before the pf.rs fix, pf-scope-forces-onto-interface failed 3 checks (148 / 140 frames on blocked link b, pb rx=68)")
+@yah:verify("shellcheck scripts/vm-l2.sh scripts/ci-control-plane.sh - clean")
+@yah:gotcha("One-time setup per host: `limactl start --name=ipauro-vmlab --tty=false template:macos-26` downloads the macOS IPSW (~17 GB on Apple's CDN; install ~7 min). The harness owns the VM's start and stop, because socket NICs attach only at boot.")
+@yah:gotcha("Not covered at this tier: member-unplug teardown (a socket NIC cannot be hot-removed like a USB gadget), USB-NCM enumeration, and the Local Network gate (the agent runs as root over lima SSH, which sidesteps it). These belong to R009-T3's hardware runbook.")
+@yah:gotcha("Full ./scripts/ci-control-plane.sh stays red until ipauro-iroh is classified (R003's in-flight crate; their courier session:2208af46 is adding the line).")
 -->
 
 <!--
@@ -388,6 +402,32 @@ re-run `ipauro-probe grants --filter ipauro` and confirm the decision records ag
   re-establishing* a session under the scope — not just observing that an already-up session
   stayed up. "Session stayed connected after we changed the rules" proves nothing under
   stateful pf.
+
+### pf states are FLOATING — a per-interface flush is a no-op, and a restart re-matches (VM tier, 2026-10-29)
+
+Measured in a macOS 26.4 guest by `crates/ipauro-vmlab` (R009-T2), case
+`pf-scope-forces-onto-interface`, with pf enabled under a stateful UDP pass (the bench condition
+above — note a STOCK pf.conf has no pass rule, and pf passes unmatched packets without creating
+state, so on a stock Mac the trap needs something else to have loaded a stateful rule first):
+
+- **States carry no interface.** macOS pf's default `state-policy` is `floating`; `pfctl -s states`
+  prints Link's flows as `ALL udp 10.70.2.1:20808 <- 10.70.2.2:20808`. So `pfctl -F states -i en2`
+  does not touch them. The helper's first `ScopeUdp` flushed exactly that way, per interface, and
+  **did not bite**: the link-b states were byte-identical before and after, the live session kept
+  flowing on the blocked link, and so did a session started afterwards.
+- **Teardown-and-re-establish does not rescue an unflushed table for Link.** Link is fixed-port at
+  both ends (`:20808 <-> :20808`), so a restarted app produces the IDENTICAL 5-tuple and re-matches
+  the surviving state, which the peer's own traffic keeps alive indefinitely. The discipline above
+  still stands, but a re-established session only proves the rule if the state table was actually
+  cleared — check the table, not just the restart.
+- **Fix (shipped in `app/helper/src/pf.rs`):** macOS `pfctl -k` selects by host/network only (no
+  port, no label), so the helper reads `pfctl -s states`, collects the host pairs of UDP states on
+  scoped ports, and kills each pair in both directions. Verified in the VM: link-b states go to `[]`,
+  the live session is cut, a fresh one never touches link b, `ClearScopes` restores it.
+- **Scoping onto a bridge is safe.** With `ScopeUdp(20808, [bridge])`, the relay's own multicast
+  still egresses every member and member↔member forwarding is unaffected (case
+  `pf-scope-on-bridge-keeps-forwarding`) — the interface-unqualified `block` in the anchor does not
+  catch bridged frames on the members on this kernel.
 
 ### Kernel bridge supports HUB-AS-PEER (verified — host multicast egresses to members)
 

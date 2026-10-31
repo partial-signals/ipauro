@@ -96,6 +96,8 @@ async fn spawn_service_with(
         helper,
         registrar: Arc::new(StubHelperRegistrar),
         usb_source,
+        mesh_node: None,
+        membership: None,
     };
     tokio::spawn(async move {
         let _ = ipauro_core::serve(config, std::future::pending::<()>()).await;

@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ipauro_proto::helper::BRIDGE_NAME;
+use ipauro_proto::helper::{BRIDGE_NAME, DhcpLease};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use super::lease::LeaseTable;
@@ -56,6 +56,8 @@ pub trait DhcpExecutor: Send + Sync {
     ) -> Result<()>;
     fn stop(&self) -> Result<()>;
     fn is_serving(&self) -> bool;
+    /// Leases currently held (empty while not serving), for the Report.
+    fn leases(&self) -> Vec<DhcpLease>;
 }
 
 /// Real raw-socket-backed executor.
@@ -66,11 +68,13 @@ pub struct RawSocketDhcpResponder {
     /// `stop()` yet.
     running: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    /// The serving thread's lease table, shared so `leases()` can read it.
+    leases: Arc<Mutex<Option<LeaseTable>>>,
 }
 
 impl Default for RawSocketDhcpResponder {
     fn default() -> Self {
-        Self { running: Arc::new(AtomicBool::new(false)), handle: Mutex::new(None) }
+        Self { running: Arc::new(AtomicBool::new(false)), handle: Mutex::new(None), leases: Arc::default() }
     }
 }
 
@@ -95,13 +99,14 @@ impl DhcpExecutor for RawSocketDhcpResponder {
 
         let socket = bind_bridge_socket()?;
         let config = DhcpConfig { server_ip, netmask, lease_secs: DEFAULT_LEASE_SECS };
-        let mut leases = LeaseTable::new(pool_start, pool_end);
+        *self.leases.lock().expect("dhcp leases mutex poisoned") = Some(LeaseTable::new(pool_start, pool_end));
+        let leases = Arc::clone(&self.leases);
 
         self.running.store(true, Ordering::SeqCst);
         let running = Arc::clone(&self.running);
         let join = std::thread::Builder::new()
             .name("ipauro-dhcp".into())
-            .spawn(move || run_loop(&socket, &running, &config, &mut leases))
+            .spawn(move || run_loop(&socket, &running, &config, &leases))
             .context("spawning DHCP responder thread")?;
         *self.handle.lock().expect("dhcp handle mutex poisoned") = Some(join);
         log::info!("DHCP responder serving {pool_start}-{pool_end} on {BRIDGE_NAME}");
@@ -119,6 +124,13 @@ impl DhcpExecutor for RawSocketDhcpResponder {
 
     fn is_serving(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    fn leases(&self) -> Vec<DhcpLease> {
+        if !self.is_serving() {
+            return Vec::new();
+        }
+        self.leases.lock().expect("dhcp leases mutex poisoned").as_ref().map(LeaseTable::snapshot).unwrap_or_default()
     }
 }
 
@@ -199,14 +211,18 @@ fn run_loop(
     socket: &UdpSocket,
     running: &AtomicBool,
     config: &DhcpConfig,
-    leases: &mut LeaseTable,
+    leases: &Mutex<Option<LeaseTable>>,
 ) {
     let mut buf = [0u8; 1500];
     while running.load(Ordering::SeqCst) {
         match socket.recv_from(&mut buf) {
             Ok((n, _from)) => match Packet::decode(&buf[..n]) {
                 Ok(pkt) => {
-                    if let Some(reply) = responder::handle_packet(config, leases, &pkt) {
+                    let reply = match leases.lock().expect("dhcp leases mutex poisoned").as_mut() {
+                        Some(table) => responder::handle_packet(config, table, &pkt),
+                        None => None, // stopped between recv and here
+                    };
+                    if let Some(reply) = reply {
                         send_reply(socket, &reply);
                     }
                 }

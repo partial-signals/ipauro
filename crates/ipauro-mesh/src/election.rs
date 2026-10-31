@@ -10,6 +10,7 @@
 //! reconcile deterministically when the views merge.
 
 use crate::ids::NodeId;
+use crate::protocol::ProtocolId;
 use crate::topology::Topology;
 
 /// A single-owner role.
@@ -24,6 +25,12 @@ pub enum Role {
     MulticastOwner,
     /// Owner of a shared sink.
     SinkOwner,
+    /// Protocol-NAT gateway for one directed translation leg (R010-F2): the
+    /// node that ingests `from` and emits `to` for the islands that cannot talk
+    /// natively. Eligible = peers honouring that translation
+    /// (`ProtocolCaps::translates`). Derivation of *which* legs need one is
+    /// [`crate::gateway`].
+    ProtocolGateway { from: ProtocolId, to: ProtocolId },
 }
 
 /// Which peers are eligible for a role, from gossiped facts. Kept simple here;
@@ -41,6 +48,12 @@ fn eligible(topo: &Topology, role: Role) -> Vec<NodeId> {
             Role::MulticastOwner | Role::SinkOwner => topo
                 .facts(*n)
                 .is_some_and(|f| f.tcap.is_some() && (f.can_relay || matches!(role, Role::SinkOwner))),
+            // A gateway must honour the leg's translation (which implies it
+            // speaks both ends). No tcap requirement: the islands it serves are
+            // by definition not tactus peers.
+            Role::ProtocolGateway { from, to } => topo
+                .facts(*n)
+                .is_some_and(|f| f.protocols.translates(from, to)),
         })
         .collect()
 }

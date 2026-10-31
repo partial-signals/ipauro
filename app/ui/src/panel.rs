@@ -10,9 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Color32, Ui};
 use ipauro_proto::ipc::Command;
+use ipauro_proto::state::Severity;
 
 use crate::state::{ConnState, RebindWatch, StatusLine};
-use crate::viewmodel::{panel_view_model, rebind_view_model, status_line_view_model};
+use crate::viewmodel::{
+    panel_view_model, rebind_view_model, status_line_view_model, MeshViewModel,
+};
 
 /// Color for an error-flagged status line — a muted red, distinguishable
 /// from ordinary text without shouting.
@@ -47,7 +50,11 @@ pub fn show(
                 ui.heading("IPAuRo");
                 ui.separator();
                 outcome.rebind_dismissed = show_rebind_callout(ui, rebind);
-                show_status(ui, &vm, commands);
+                // The panel window is fixed-size; the mesh member list grows.
+                egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                    show_status(ui, &vm, commands);
+                    show_mesh(ui, &vm.mesh, commands);
+                });
             }
         }
         show_status_line(ui, status);
@@ -131,6 +138,39 @@ fn show_status(ui: &mut Ui, vm: &crate::viewmodel::PanelViewModel, commands: &Se
     let scope_button = egui::Button::new(egui::RichText::new(scope_label).size(16.0));
     if ui.add_sized([ui.available_width(), 36.0], scope_button).clicked() {
         let _ = commands.send(Command::SetTransportScope { enabled: !vm.link_scope_desired });
+    }
+}
+
+/// The mesh section: the role toggle for THIS machine (the only control —
+/// remote members are display-only rows), rate, bootstrap health, members,
+/// and every blockage with its remedy.
+fn show_mesh(ui: &mut Ui, mesh: &MeshViewModel, commands: &Sender<Command>) {
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new("Mesh").strong());
+    ui.label(&mesh.role_line);
+    let toggle = egui::Button::new(egui::RichText::new(&mesh.role_toggle_label).size(16.0));
+    if ui.add_sized([ui.available_width(), 32.0], toggle).clicked() {
+        let _ = commands.send(Command::SetRole { role: mesh.role_toggle_target });
+    }
+    if let Some(note) = &mesh.version_note {
+        ui.label(egui::RichText::new(note).italics());
+    }
+    if !mesh.rate_line.is_empty() {
+        ui.label(format!("Rate: {}", mesh.rate_line));
+        ui.label(&mesh.bootstrap_line);
+    }
+    for m in &mesh.members {
+        let text = egui::RichText::new(&m.text).monospace();
+        ui.label(if m.dimmed { text.weak() } else { text });
+    }
+    for b in &mesh.blockages {
+        let color = match b.severity {
+            Severity::Blocked => ERROR_COLOR,
+            Severity::Degraded => WARN_COLOR,
+            Severity::Info => ui.visuals().weak_text_color(),
+        };
+        ui.label(egui::RichText::new(&b.cause).color(color));
+        ui.label(egui::RichText::new(format!("→ {}", b.remedy)).italics().weak());
     }
 }
 

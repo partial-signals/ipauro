@@ -52,8 +52,45 @@ pub fn handle_request(executors: &Executors, request: HelperRequest) -> HelperRe
         HelperRequest::ServeDhcp { pool_start, pool_end, netmask } => {
             handle_serve_dhcp(executors, *pool_start, *pool_end, *netmask)
         }
+        HelperRequest::AddAlias { iface, addr, prefix } => {
+            match validate_alias_iface(executors, iface)
+                .and_then(|()| netutil::validate_alias_add(*addr, *prefix))
+            {
+                Ok(()) => result_to_ok(executors.bridge.add_alias(iface, *addr, *prefix)),
+                Err(message) => HelperResponse::Err { message },
+            }
+        }
+        HelperRequest::RemoveAlias { iface, addr } => {
+            match validate_alias_iface(executors, iface)
+                .and_then(|()| netutil::validate_alias_remove(*addr))
+            {
+                Ok(()) => result_to_ok(executors.bridge.remove_alias(iface, *addr)),
+                Err(message) => HelperResponse::Err { message },
+            }
+        }
         HelperRequest::StopDhcp => result_to_ok(executors.dhcp.stop()),
         HelperRequest::Report => handle_report(executors),
+    }
+}
+
+/// The interface half of alias validation (R003-B10): the bridge, or an
+/// uplink the executor can verify (`^en[0-9]+$`, exists, not a bridge member,
+/// not the default-route interface). Anything else — the user's Wi-Fi/primary
+/// NIC, `lo0`, `awdl0`, an arbitrary string — is refused before any exec.
+fn validate_alias_iface(executors: &Executors, iface: &str) -> Result<(), String> {
+    if iface == BRIDGE_NAME {
+        return Ok(());
+    }
+    if !netutil::is_en_iface(iface) {
+        return Err(format!("{iface} is neither {BRIDGE_NAME} nor an enN uplink interface"));
+    }
+    let candidates = executors.bridge.uplink_candidates().map_err(|e| e.to_string())?;
+    if candidates.iter().any(|c| c == iface) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{iface} is not a managed uplink (missing, a bridge member, or the default-route interface)"
+        ))
     }
 }
 
@@ -163,11 +200,32 @@ fn handle_report(executors: &Executors) -> HelperResponse {
         Ok(info) => info,
         Err(e) => return HelperResponse::Err { message: e.to_string() },
     };
+    let bridge_aliases = match executors.bridge.aliases(BRIDGE_NAME) {
+        Ok(a) => a,
+        Err(e) => return HelperResponse::Err { message: e.to_string() },
+    };
+    let mut uplink_aliases = Vec::new();
+    match executors.bridge.uplink_candidates() {
+        Ok(candidates) => {
+            for iface in candidates {
+                match executors.bridge.aliases(&iface) {
+                    Ok(a) if !a.is_empty() => uplink_aliases.push((iface, a)),
+                    Ok(_) => {}
+                    // An uplink that vanished mid-report is not a report failure.
+                    Err(e) => log::warn!("could not read aliases on {iface}: {e:#}"),
+                }
+            }
+        }
+        Err(e) => return HelperResponse::Err { message: e.to_string() },
+    }
     HelperResponse::Report {
         report: DataPlaneReport {
             bridge,
             scoped_ports: executors.pf.scoped_ports(),
             dhcp_serving: executors.dhcp.is_serving(),
+            bridge_aliases,
+            uplink_aliases,
+            dhcp_leases: executors.dhcp.leases(),
         },
     }
 }
@@ -176,6 +234,7 @@ fn handle_report(executors: &Executors) -> HelperResponse {
 mod tests {
     use std::sync::Mutex;
 
+    use ipauro_proto::helper::DhcpLease;
     use ipauro_proto::state::BridgeInfo;
 
     use super::*;
@@ -190,7 +249,16 @@ mod tests {
         set_members_err: Mutex<Option<String>>,
         set_address_err: Mutex<Option<String>>,
         address_prefix: Mutex<Result<Option<u8>, String>>,
+        /// Aliases per interface name (the bridge under `bridge90`).
+        aliases: Mutex<std::collections::BTreeMap<String, Vec<std::net::IpAddr>>>,
+        uplinks: Mutex<Vec<String>>,
         calls: Mutex<Vec<String>>,
+    }
+
+    impl MockBridge {
+        fn aliases_on(&self, iface: &str) -> Vec<std::net::IpAddr> {
+            self.aliases.lock().unwrap().get(iface).cloned().unwrap_or_default()
+        }
     }
 
     impl Default for MockBridge {
@@ -203,6 +271,8 @@ mod tests {
                 set_members_err: Mutex::new(None),
                 set_address_err: Mutex::new(None),
                 address_prefix: Mutex::new(Ok(None)),
+                aliases: Mutex::new(Default::default()),
+                uplinks: Mutex::new(Vec::new()),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -236,6 +306,30 @@ mod tests {
         fn address_prefix(&self) -> anyhow::Result<Option<u8>> {
             self.calls.lock().unwrap().push("address_prefix".into());
             self.address_prefix.lock().unwrap().clone().map_err(|m| anyhow::anyhow!(m))
+        }
+        fn aliases(&self, iface: &str) -> anyhow::Result<Vec<std::net::IpAddr>> {
+            self.calls.lock().unwrap().push(format!("aliases({iface})"));
+            Ok(self.aliases_on(iface))
+        }
+        fn add_alias(&self, iface: &str, addr: std::net::IpAddr, prefix: u8) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("add_alias({iface}, {addr}/{prefix})"));
+            let mut m = self.aliases.lock().unwrap();
+            let a = m.entry(iface.to_string()).or_default();
+            if !a.contains(&addr) {
+                a.push(addr);
+            }
+            Ok(())
+        }
+        fn remove_alias(&self, iface: &str, addr: std::net::IpAddr) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("remove_alias({iface}, {addr})"));
+            if let Some(a) = self.aliases.lock().unwrap().get_mut(iface) {
+                a.retain(|x| *x != addr);
+            }
+            Ok(())
+        }
+        fn uplink_candidates(&self) -> anyhow::Result<Vec<String>> {
+            self.calls.lock().unwrap().push("uplink_candidates".into());
+            Ok(self.uplinks.lock().unwrap().clone())
         }
     }
 
@@ -301,6 +395,13 @@ mod tests {
         }
         fn is_serving(&self) -> bool {
             *self.serving.lock().unwrap()
+        }
+        fn leases(&self) -> Vec<DhcpLease> {
+            if self.is_serving() {
+                vec![DhcpLease { mac: [2, 0, 0, 0, 0, 5], ipv4: Ipv4Addr::new(10, 69, 0, 10) }]
+            } else {
+                Vec::new()
+            }
         }
     }
 
@@ -405,6 +506,102 @@ mod tests {
             !calls.iter().any(|c| c.starts_with("set_members")),
             "set_members must not run: {calls:?}"
         );
+    }
+
+    // ---- AddAlias / RemoveAlias ------------------------------------------------
+
+    fn add(iface: &str, addr: &str, prefix: u8) -> HelperRequest {
+        HelperRequest::AddAlias { iface: iface.into(), addr: addr.parse().unwrap(), prefix }
+    }
+
+    #[test]
+    fn alias_add_on_bridge_dispatches_and_is_idempotent() {
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        let addr: std::net::IpAddr = "fd1b:5a70:a52::1".parse().unwrap();
+        for _ in 0..2 {
+            assert_eq!(handle_request(&executors, add("bridge90", "fd1b:5a70:a52::1", 64)), HelperResponse::Ok);
+        }
+        assert_eq!(bridge.aliases_on("bridge90"), vec![addr], "second add must not duplicate");
+    }
+
+    #[test]
+    fn alias_add_on_a_verified_uplink_dispatches() {
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        *bridge.uplinks.lock().unwrap() = vec!["en5".into()];
+        assert_eq!(handle_request(&executors, add("en5", "10.42.3.4", 16)), HelperResponse::Ok);
+        assert_eq!(bridge.aliases_on("en5"), vec!["10.42.3.4".parse::<std::net::IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn alias_on_a_non_uplink_interface_is_refused_before_any_exec() {
+        // en0 stands for the user's primary NIC / a bridge member / a missing
+        // interface: the executor does not list it as a candidate.
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        *bridge.uplinks.lock().unwrap() = vec!["en5".into()];
+        for iface in ["en0", "en12", "lo0", "awdl0", "bridge91", "en5; reboot", ""] {
+            let resp = handle_request(&executors, add(iface, "fd1b:5a70:a52::1", 64));
+            assert!(matches!(resp, HelperResponse::Err { .. }), "{iface:?} must be refused");
+            let resp = handle_request(
+                &executors,
+                HelperRequest::RemoveAlias { iface: iface.into(), addr: "fd1b:5a70:a52::1".parse().unwrap() },
+            );
+            assert!(matches!(resp, HelperResponse::Err { .. }), "{iface:?} remove must be refused");
+        }
+        let calls = bridge.calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("add_alias") || c.starts_with("remove_alias")),
+            "nothing may exec: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn alias_add_rejects_bad_class_or_prefix_before_any_exec() {
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        *bridge.uplinks.lock().unwrap() = vec!["en5".into()];
+        for iface in ["bridge90", "en5"] {
+            for (a, p) in [("fe80::1", 64u8), ("2001:db8::1", 64), ("fd00::1", 48), ("8.8.8.8", 24)] {
+                let resp = handle_request(&executors, add(iface, a, p));
+                assert!(matches!(resp, HelperResponse::Err { .. }), "{iface} {a}/{p}");
+            }
+        }
+        let calls = bridge.calls.lock().unwrap();
+        assert!(!calls.iter().any(|c| c.starts_with("add_alias")), "{calls:?}");
+    }
+
+    #[test]
+    fn alias_remove_valid_and_rejects_link_local() {
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        let addr: std::net::IpAddr = "10.42.3.4".parse().unwrap();
+        bridge.aliases.lock().unwrap().insert("bridge90".into(), vec![addr]);
+        assert_eq!(
+            handle_request(&executors, HelperRequest::RemoveAlias { iface: "bridge90".into(), addr }),
+            HelperResponse::Ok
+        );
+        assert!(bridge.aliases_on("bridge90").is_empty());
+        let before = bridge.calls.lock().unwrap().len();
+        let resp = handle_request(
+            &executors,
+            HelperRequest::RemoveAlias { iface: "bridge90".into(), addr: "fe80::1".parse().unwrap() },
+        );
+        assert!(matches!(resp, HelperResponse::Err { .. }));
+        assert_eq!(bridge.calls.lock().unwrap().len(), before);
+    }
+
+    #[test]
+    fn report_carries_bridge_and_uplink_aliases() {
+        let (bridge, _pf, _dhcp, executors) = mocks();
+        let addr: std::net::IpAddr = "fd00::5".parse().unwrap();
+        let up: std::net::IpAddr = "10.42.3.4".parse().unwrap();
+        bridge.aliases.lock().unwrap().insert("bridge90".into(), vec![addr]);
+        bridge.aliases.lock().unwrap().insert("en5".into(), vec![up]);
+        *bridge.uplinks.lock().unwrap() = vec!["en5".into(), "en6".into()];
+        match handle_request(&executors, HelperRequest::Report) {
+            HelperResponse::Report { report } => {
+                assert_eq!(report.bridge_aliases, vec![addr]);
+                assert_eq!(report.uplink_aliases, vec![("en5".to_string(), vec![up])], "en6 has none: omitted");
+            }
+            other => panic!("expected Report, got {other:?}"),
+        }
     }
 
     // ---- SetBridgeAddress ------------------------------------------------------
@@ -597,6 +794,9 @@ mod tests {
                     bridge: Some(info),
                     scoped_ports: vec![(20808, vec!["bridge90".to_string()])],
                     dhcp_serving: true,
+                    bridge_aliases: vec![],
+                    uplink_aliases: vec![],
+                    dhcp_leases: vec![DhcpLease { mac: [2, 0, 0, 0, 0, 5], ipv4: Ipv4Addr::new(10, 69, 0, 10) }],
                 }
             }
         );

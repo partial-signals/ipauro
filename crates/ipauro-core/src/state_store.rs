@@ -4,13 +4,16 @@
 //! "the service's desired-state store is the single source of truth; every
 //! client ... is a commander/renderer kept in sync by snapshot+events."
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use ipauro_mesh::ids::NodeId;
 use ipauro_proto::ipc::EventBody;
 use ipauro_proto::state::Snapshot;
 use tokio::sync::{broadcast, RwLock};
 
+use crate::addressing::{MeshAddressing, PrimaryAddrs};
 use crate::discovery::{IfaceObservation, LinkInventory, LinkRole};
 
 /// Backpressure buffer for the broadcast channel. State changes are rare and
@@ -43,6 +46,10 @@ pub struct StateStore {
     /// candidate future addition). `reconcile::drive_once` reads this
     /// alongside `Snapshot.bridge.desired_up` to build a `reconcile::Desired`.
     desired_scope_enabled: AtomicBool,
+    /// This node's mesh addressing plan + the member set it is computed over
+    /// (R003-T3). Snapshot-adjacent like `desired_scope_enabled`: the wire
+    /// snapshot carries only OBSERVED state.
+    mesh: Mutex<MeshState>,
     /// The latest USB-NCM identification pass (R005-F7) and the interface
     /// observations it took. Snapshot-ADJACENT for the same reason as
     /// `desired_scope_enabled`: the wire [`Snapshot`] has no field for link
@@ -54,6 +61,30 @@ pub struct StateStore {
     /// The observations are kept because A002 §5.2's traffic signal is a
     /// DELTA — one pass's counters mean nothing without the previous pass's.
     links: Mutex<Identification>,
+}
+
+/// The mesh actions a command can drive (R003-T5), behind a trait so the
+/// command path is testable without a live iroh node. `MeshMembership`
+/// implements it.
+pub trait MeshControl: Send + Sync {
+    /// Propose lifting the whole mesh to `hz`; returns the new adopted rate.
+    fn propose_rate(&self, hz: u32) -> Result<ipauro_mesh::rate::MeshRate, ipauro_mesh::rate::RateError>;
+}
+
+impl MeshControl for ipauro_iroh::MeshMembership {
+    fn propose_rate(&self, hz: u32) -> Result<ipauro_mesh::rate::MeshRate, ipauro_mesh::rate::RateError> {
+        ipauro_iroh::MeshMembership::propose_rate(self, hz)
+    }
+}
+
+#[derive(Default)]
+struct MeshState {
+    control: Option<std::sync::Arc<dyn MeshControl>>,
+    addressing: Option<MeshAddressing>,
+    members: BTreeSet<NodeId>,
+    role_path: Option<std::path::PathBuf>,
+    /// The helper's DHCP leases as of the last Report (R003-F6).
+    dhcp_leases: Vec<ipauro_proto::helper::DhcpLease>,
 }
 
 /// The identification state carried between reconcile passes.
@@ -78,6 +109,7 @@ impl StateStore {
             seq: AtomicU64::new(0),
             tx,
             desired_scope_enabled: AtomicBool::new(false),
+            mesh: Mutex::new(MeshState::default()),
             links: Mutex::new(Identification::default()),
         }
     }
@@ -115,6 +147,76 @@ impl StateStore {
         guard.inventory = inventory;
         guard.observations = observations;
         changed
+    }
+
+    /// Install this node's addressing plan (once, at startup).
+    pub fn set_mesh_addressing(&self, addressing: MeshAddressing) {
+        self.mesh.lock().expect("mesh mutex poisoned").addressing = Some(addressing);
+    }
+
+    /// THE SEAM for gossip membership (R003-F2/F4): replace the known member
+    /// set. IPv4 collision resolution is a function of this set, so a change
+    /// can move this node's address; the reconciler then removes the old alias
+    /// before adding the new one. Callers should kick a reconcile pass after.
+    ///
+    /// Returns whether the set actually changed.
+    pub fn set_mesh_members(&self, members: BTreeSet<NodeId>) -> bool {
+        let mut m = self.mesh.lock().expect("mesh mutex poisoned");
+        let changed = m.members != members;
+        m.members = members;
+        changed
+    }
+
+    /// Record the DHCP leases from the latest helper Report (R003-F6): the
+    /// foreign leaves this hub advertises and terminates control for.
+    pub fn set_dhcp_leases(&self, leases: Vec<ipauro_proto::helper::DhcpLease>) {
+        self.mesh.lock().expect("mesh mutex poisoned").dhcp_leases = leases;
+    }
+
+    /// The DHCP leases from the latest helper Report.
+    pub fn dhcp_leases(&self) -> Vec<ipauro_proto::helper::DhcpLease> {
+        self.mesh.lock().expect("mesh mutex poisoned").dhcp_leases.clone()
+    }
+
+    /// Install the mesh action handle (once, at startup).
+    pub fn set_mesh_control(&self, control: std::sync::Arc<dyn MeshControl>) {
+        self.mesh.lock().expect("mesh mutex poisoned").control = Some(control);
+    }
+
+    /// The mesh action handle, when a mesh is running.
+    pub fn mesh_control(&self) -> Option<std::sync::Arc<dyn MeshControl>> {
+        self.mesh.lock().expect("mesh mutex poisoned").control.clone()
+    }
+
+    /// The live (non-expired) member set the addressing plan is computed over.
+    pub fn mesh_members(&self) -> BTreeSet<NodeId> {
+        self.mesh.lock().expect("mesh mutex poisoned").members.clone()
+    }
+
+    /// This node's addressing plan, when it has a mesh identity.
+    pub fn mesh_addressing(&self) -> Option<MeshAddressing> {
+        self.mesh.lock().expect("mesh mutex poisoned").addressing
+    }
+
+    /// Where `persist_role` writes (R003-F4). Unset = not persisted (tests).
+    pub fn set_role_path(&self, path: std::path::PathBuf) {
+        self.mesh.lock().expect("mesh mutex poisoned").role_path = Some(path);
+    }
+
+    /// Persist the elected role if a path is configured.
+    pub fn persist_role(&self, role: ipauro_proto::state::NodeRole) -> std::io::Result<()> {
+        let path = self.mesh.lock().expect("mesh mutex poisoned").role_path.clone();
+        match path {
+            Some(p) => crate::role::save(&p, role),
+            None => Ok(()),
+        }
+    }
+
+    /// The addresses this node wants on the bridge now; `None` without a mesh
+    /// identity (M1-only operation).
+    pub fn desired_primary(&self) -> Option<PrimaryAddrs> {
+        let m = self.mesh.lock().expect("mesh mutex poisoned");
+        m.addressing.as_ref().map(|a| a.desired(&m.members))
     }
 
     /// Current `SetTransportScope` desired flag. See the field doc for why

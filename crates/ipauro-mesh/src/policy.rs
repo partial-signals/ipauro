@@ -9,6 +9,7 @@
 
 use crate::gossip::Record;
 use crate::ids::NodeId;
+use crate::rate::MeshRate;
 use crate::transport::TransportKind;
 
 /// Weights of the edge-cost objective. Shared mesh-wide; changing them is a new
@@ -100,6 +101,9 @@ pub struct Policy {
     pub weights: Weights,
     pub service_order: ServiceOrder,
     pub epoch: PolicyEpoch,
+    /// The mesh-wide sample rate (R003-F8), strongly ordered by its own epoch,
+    /// independent of the objective's [`PolicyEpoch`].
+    pub rate: MeshRate,
 }
 
 impl Policy {
@@ -108,6 +112,7 @@ impl Policy {
             weights: Weights::default(),
             service_order: ServiceOrder::default(),
             epoch: PolicyEpoch { epoch: 0, author },
+            rate: MeshRate::new(author),
         }
     }
 
@@ -116,10 +121,15 @@ impl Policy {
     /// optimizes against an identical objective, which is what lets independent
     /// optimizers converge without consensus.
     pub fn observe_epoch(&mut self, record: &Record) {
+        // The rate is ordered by its own epoch: adopt it independently of the
+        // objective, and never let a replaced policy roll it back.
+        let mut rate = self.rate;
+        rate.observe(record);
         if let Some(p) = record.policy.as_ref()
             && self.epoch.superseded_by(&p.epoch)
         {
             *self = p.clone();
         }
+        self.rate = rate;
     }
 }

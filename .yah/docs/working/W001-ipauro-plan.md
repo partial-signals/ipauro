@@ -610,6 +610,21 @@ CPU-bound not bandwidth-bound. Depends on M2 (capability gossip) + M4 (registry)
   session staying up proves nothing under stateful `pf`). No USB needed. (Apple licensing caps
   macOS VMs at 2 per host, so 4+-node integration tests — R006-T5, R010-T5 — are hardware-runbook
   tier, not VM tier.)
+  **Built (R009-T2): `crates/ipauro-vmlab` + `scripts/vm-l2.sh`.** Shape differs from "VMs on a
+  virtual switch" in one deliberate way: ONE macOS guest (lima `template:macos-26`, vz) is the
+  device under test, and its two extra NICs are lima `socket:` networks whose unix sockets the
+  harness itself owns (qemu stream framing). Every wire observation is therefore taken OUTSIDE the
+  kernel under test, and the other hosts on each segment are emulated peers (MAC + IP + ARP + a
+  Link-shaped beacon) rather than more VMs — so the 2-VM cap never binds here. The same binary runs
+  in the guest as a Link-shaped endpoint (one socket per interface on `:20808`, multicast + unicast,
+  group joined per interface). pf cases drive the REAL helper `PfctlExecutor` via a dev-only
+  `ipauro-helper --pf-console` (refuses without `IPAURO_INSECURE_DEV=1`), not a re-implementation.
+  Five named cases, 27 checks: `bridge-floods-member-multicast` (built AND rebuilt),
+  `bridge-host-multicast-egress`, `pf-stateful-trap` (reproduces A002's trap on purpose, so the
+  harness is shown able to see it), `pf-scope-forces-onto-interface`,
+  `pf-scope-on-bridge-keeps-forwarding`. First run found a real helper bug — the state flush was a
+  no-op — see A002 "pf states are FLOATING". Not here: member-unplug teardown (a socket NIC cannot be
+  hot-removed like a USB gadget) — hardware runbook, R009-T3.
 - **Physical/security reality → hardware runbook (un-CI-able):** USB data-role negotiation,
   cable quality, accessory approval, EDR, Local Network privacy. Bench checklist + ship
   *detection* so the field reports these, not CI.

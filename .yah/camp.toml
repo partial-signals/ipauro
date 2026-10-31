@@ -1,3 +1,4 @@
+env = "native"
 relay_high_water = 11
 camp_id = "797526d8356d"
 # Per-camp config for the IPAuRo subcamp.

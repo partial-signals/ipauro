@@ -1,10 +1,22 @@
-//! Capability records — the mesh view of `tcap` (spec §4.2, §8).
+//! Capability records — two layers.
 //!
-//! `tcap` is advertised on the wire in the tactus PeerAnnouncement (a payload
-//! entry a v1 peer ignores — empirically verified, spec §1.1). This crate does
-//! not *encode* the wire form (that is the spec's/tactus's job and the encoding
-//! boundary is open question §10.6); it holds the decoded view the router and the
-//! clock logic consume.
+//! - [`Tcap`]: the mesh view of tactus's `tcap` (spec §4.2, §8) — what a
+//!   **tactus** peer negotiates for native mode. `tcap` is advertised on the wire
+//!   in the tactus PeerAnnouncement (a payload entry a v1 peer ignores —
+//!   empirically verified, spec §1.1). This crate does not *encode* the wire form
+//!   (that is the spec's/tactus's job and the encoding boundary is open question
+//!   §10.6); it holds the decoded view the router and the clock logic consume.
+//! - [`ProtocolCaps`] (R010-F1): which **protocol families** a node speaks, with
+//!   what verbs/formats/clock per protocol, and which pairs it can translate
+//!   between. This is the cross-family discovery no predecessor has (A003 §4):
+//!   it travels in the same gossip record as `tcap` ([`crate::topology::PeerFacts`])
+//!   and is what makes a Protocol-NAT gateway *electable* (R010-F2) rather than
+//!   hand-configured.
+//!
+//! The per-protocol vocabulary (formats, clock refs) is the registry's,
+//! [`crate::protocol`]; a peer advertises a *subset* of its protocol's row.
+
+use crate::protocol::{self, ExtProfile, ProtocolId, Profiles, Row, SampleFormats};
 
 /// Codecs a peer will accept in native mode (spec §5).
 #[derive(Clone, Copy, Default, Debug)]
@@ -135,5 +147,257 @@ fn pick_fec(a: &FecSchemes, b: &FecSchemes) -> Option<Fec> {
         Some(Fec::XorParity)
     } else {
         None
+    }
+}
+
+// --- protocol-family capability (R010-F1) -----------------------------------
+
+/// The native verbs a peer offers *within* one protocol (A004 §2 adapter
+/// contract: pass / sink / fan-in / fan-out; `transcode` is a protocol *pair*
+/// property and lives in [`Translation`]). Fan-in here is routing discrete
+/// streams onto one leg, never summing — this app does not mix (W001 §non-goals).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Verbs {
+    /// Forward a stream of this protocol unchanged (a same-protocol relay hop).
+    pub pass: bool,
+    /// Terminate a stream of this protocol locally (the system-sound plugin,
+    /// a DAC round-trip).
+    pub sink: bool,
+    /// Originate streams of this protocol (`can_originate` in A004).
+    pub source: bool,
+    /// Aggregate several incoming streams onto one outgoing leg, channel-discrete.
+    pub fan_in: bool,
+    /// Replicate one incoming stream to several legs.
+    pub fan_out: bool,
+}
+
+/// One protocol a peer speaks, and how well: the subset of the registry row it
+/// actually implements, plus the media-clock domains it is disciplined to for
+/// that protocol (a Dante peer is in a PTPv1 domain *number*; an AVB peer in a
+/// gPTP one — the same `ClockDomain::Ptp(n)` vocabulary as `tcap`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProtocolCapability {
+    pub proto: ProtocolId,
+    pub verbs: Verbs,
+    /// Formats this peer handles for `proto`; must be ⊆ the registry row's.
+    pub formats: SampleFormats,
+    /// Sample rates this peer handles for `proto`; must be ⊆ the registry row's.
+    /// Empty = every rate the protocol defines.
+    pub rates_hz: Vec<u32>,
+    pub clock_domains: Vec<ClockDomain>,
+    /// The registry row for an extension family (R003-F7): `Some` iff `proto`
+    /// is [`ProtocolId::Ext`] with the matching id ([`ProtocolCaps::validate`]).
+    /// This is how every node learns an extension family's axes.
+    pub ext: Option<ExtProfile>,
+}
+
+impl ProtocolCapability {
+    /// A capability that claims the whole registry row (every format and rate)
+    /// with the given verbs and no clock-domain membership. Tests and simple
+    /// adapters start here and narrow.
+    ///
+    /// In-tree families only (panics on [`ProtocolId::Ext`]); an extension
+    /// family is built with [`ProtocolCapability::ext`], which needs its row.
+    #[track_caller]
+    pub fn full(proto: ProtocolId, verbs: Verbs) -> Self {
+        Self {
+            proto,
+            verbs,
+            formats: protocol::profile(proto).formats,
+            rates_hz: Vec::new(),
+            clock_domains: Vec::new(),
+            ext: None,
+        }
+    }
+
+    /// A capability claiming the whole of an extension family's declared row.
+    pub fn ext(row: ExtProfile, verbs: Verbs) -> Self {
+        Self {
+            proto: ProtocolId::Ext(row.id),
+            verbs,
+            formats: row.formats,
+            rates_hz: Vec::new(),
+            clock_domains: Vec::new(),
+            ext: Some(row),
+        }
+    }
+}
+
+/// A transcode the peer offers: ingest `from` into the canonical stream, emit
+/// as `to` (A004 §2). Directed — bridging Dante→AVB and AVB→Dante are two
+/// translations, because an adapter may implement only ingest *or* emit.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Translation {
+    pub from: ProtocolId,
+    pub to: ProtocolId,
+}
+
+/// Everything a node asserts about the protocol families it speaks. Gossiped
+/// as part of `PeerFacts`; the author is the only one who may write it.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct ProtocolCaps {
+    pub speaks: Vec<ProtocolCapability>,
+    pub translates: Vec<Translation>,
+}
+
+/// Why a [`ProtocolCaps`] is not self-consistent. A publisher checks before it
+/// gossips; a receiver never needs to, because the queries below only honour
+/// translations whose endpoints are spoken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CapsError {
+    /// The same protocol appears twice in `speaks`.
+    DuplicateProtocol(ProtocolId),
+    /// A translation names a protocol the node does not speak.
+    TranslatesUnspoken(Translation),
+    /// A translation from a protocol to itself (that is `Verbs::pass`).
+    SelfTranslation(ProtocolId),
+    /// A translation endpoint carries no media (nothing to transcode).
+    TranslatesNoMedia(Translation),
+    /// A capability claims a format its protocol does not define.
+    FormatOutsideProtocol(ProtocolId),
+    /// A capability claims a rate its protocol does not define.
+    RateOutsideProtocol(ProtocolId, u32),
+    /// An extension family without its row, a row on an in-tree family, or a
+    /// row whose id is not the capability's (R003-F7).
+    ProfileMismatch(ProtocolId),
+}
+
+impl Profiles for ProtocolCaps {
+    /// In-tree rows from the table; extension rows from this node's own
+    /// capability for that family.
+    fn row(&self, id: ProtocolId) -> Option<Row<'_>> {
+        match id {
+            ProtocolId::Ext(_) => self.speaks(id).and_then(|c| c.ext.as_ref()).map(Row::Ext),
+            in_tree => protocol::in_tree(in_tree).map(Row::InTree),
+        }
+    }
+}
+
+impl ProtocolCaps {
+    /// The capability this node advertises for `proto`, if it speaks it.
+    pub fn speaks(&self, proto: ProtocolId) -> Option<&ProtocolCapability> {
+        self.speaks.iter().find(|c| c.proto == proto)
+    }
+
+    /// Can this node bridge `from` → `to`? True only if it advertises the
+    /// translation *and* speaks both ends — a translation whose endpoint is not
+    /// spoken is ignored, so a malformed advertisement can never make a node
+    /// look like a gateway it is not.
+    pub fn translates(&self, from: ProtocolId, to: ProtocolId) -> bool {
+        from != to
+            && self.speaks(from).is_some()
+            && self.speaks(to).is_some()
+            && self.translates.contains(&Translation { from, to })
+    }
+
+    /// Every translation this node honours (see [`translates`](Self::translates)),
+    /// sorted — the gateway election ranks candidates by it.
+    pub fn honoured_translations(&self) -> Vec<Translation> {
+        let mut v: Vec<Translation> = self
+            .translates
+            .iter()
+            .copied()
+            .filter(|t| self.translates(t.from, t.to))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Speaks more than one media-carrying protocol — the raw material of a
+    /// Protocol-NAT gateway (R010-F2 elects among polyglots that also translate).
+    pub fn is_polyglot(&self) -> bool {
+        self.speaks
+            .iter()
+            .filter(|c| self.row(c.proto).is_some_and(|r| r.carries_media()))
+            .count()
+            > 1
+    }
+
+    /// What a node advertises when several sources contribute capabilities
+    /// (its in-tree adapters plus its stream-socket sidecars, R003-F7):
+    /// per family, verbs/formats/rates/clock domains are unioned (`self`'s
+    /// extension row wins a disagreement); translations are unioned. Output is
+    /// sorted, so equal inputs publish byte-identical records.
+    pub fn union(&self, other: &ProtocolCaps) -> ProtocolCaps {
+        let mut speaks: Vec<ProtocolCapability> = self.speaks.clone();
+        for c in &other.speaks {
+            match speaks.iter_mut().find(|d| d.proto == c.proto) {
+                None => speaks.push(c.clone()),
+                Some(d) => {
+                    let (a, b) = (d.verbs, c.verbs);
+                    d.verbs = Verbs {
+                        pass: a.pass | b.pass,
+                        sink: a.sink | b.sink,
+                        source: a.source | b.source,
+                        fan_in: a.fan_in | b.fan_in,
+                        fan_out: a.fan_out | b.fan_out,
+                    };
+                    let f = SampleFormats::from_bits(d.formats.bits() | c.formats.bits());
+                    d.formats = f;
+                    // Empty = every rate the family defines, which absorbs any list.
+                    if d.rates_hz.is_empty() || c.rates_hz.is_empty() {
+                        d.rates_hz.clear();
+                    } else {
+                        d.rates_hz.extend(&c.rates_hz);
+                        d.rates_hz.sort();
+                        d.rates_hz.dedup();
+                    }
+                    for cd in &c.clock_domains {
+                        if !d.clock_domains.contains(cd) {
+                            d.clock_domains.push(*cd);
+                        }
+                    }
+                    if d.ext.is_none() {
+                        d.ext = c.ext.clone();
+                    }
+                }
+            }
+        }
+        speaks.sort_by_key(|c| c.proto);
+        let mut translates: Vec<Translation> = self.translates.iter().chain(&other.translates).copied().collect();
+        translates.sort();
+        translates.dedup();
+        ProtocolCaps { speaks, translates }
+    }
+
+    /// Publisher-side consistency check against the registry.
+    // `CapsError` carries the offending ids by value (Copy); with extension
+    // ids inline (R003-F7) that is large, but this runs per publish, not per frame.
+    #[allow(clippy::result_large_err)]
+    pub fn validate(&self) -> Result<(), CapsError> {
+        for (i, c) in self.speaks.iter().enumerate() {
+            if self.speaks[..i].iter().any(|d| d.proto == c.proto) {
+                return Err(CapsError::DuplicateProtocol(c.proto));
+            }
+            let consistent = match (c.proto, &c.ext) {
+                (ProtocolId::Ext(id), Some(row)) => row.id == id,
+                (ProtocolId::Ext(_), None) => false,
+                (_, ext) => ext.is_none(),
+            };
+            if !consistent {
+                return Err(CapsError::ProfileMismatch(c.proto));
+            }
+            let row = self.row(c.proto).ok_or(CapsError::ProfileMismatch(c.proto))?;
+            if !row.formats().contains(&c.formats) {
+                return Err(CapsError::FormatOutsideProtocol(c.proto));
+            }
+            if let Some(&r) = c.rates_hz.iter().find(|r| !row.rates_hz().contains(r)) {
+                return Err(CapsError::RateOutsideProtocol(c.proto, r));
+            }
+        }
+        for t in &self.translates {
+            if t.from == t.to {
+                return Err(CapsError::SelfTranslation(t.from));
+            }
+            if self.speaks(t.from).is_none() || self.speaks(t.to).is_none() {
+                return Err(CapsError::TranslatesUnspoken(*t));
+            }
+            let media = |p| self.row(p).is_some_and(|r| r.carries_media());
+            if !media(t.from) || !media(t.to) {
+                return Err(CapsError::TranslatesNoMedia(*t));
+            }
+        }
+        Ok(())
     }
 }

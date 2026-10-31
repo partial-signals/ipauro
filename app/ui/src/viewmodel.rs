@@ -3,7 +3,10 @@
 //! `panel.rs`/`widget.rs` free of string formatting and enum-variant
 //! matching.
 
-use ipauro_proto::state::{BridgeState, HelperState, ServiceInfo, Snapshot, TransportState};
+use ipauro_proto::state::{
+    BeaconStatus, BridgeState, HelperState, Liveness, MeshView, N0Status, NodeRole, ServiceInfo,
+    Severity, Snapshot, TransportState,
+};
 
 use crate::state::{RebindWatch, StatusLine};
 
@@ -34,6 +37,44 @@ pub struct PanelViewModel {
     /// Mirrors `link_scope_desired`, not `link_scoped` — same "what will
     /// clicking this do" convention as `bridge_desired_up`.
     pub link_scope_desired: bool,
+    pub mesh: MeshViewModel,
+}
+
+/// The mesh section of the panel (R003-T5): this machine's role toggle, then
+/// READ-ONLY rows for the other members and for every blockage. Remote roles
+/// have no control by construction (no remote-set exists in the protocol).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshViewModel {
+    /// "This machine: Hub".
+    pub role_line: String,
+    /// "Switch to Peer" — the toggle always reads what clicking will do.
+    pub role_toggle_label: String,
+    /// The role clicking the toggle sends in `Command::SetRole`.
+    pub role_toggle_target: NodeRole,
+    /// "48000 Hz · epoch 0".
+    pub rate_line: String,
+    /// "Beacon: up on bridge90 · n0: off".
+    pub bootstrap_line: String,
+    /// Remote members only, in the order the service listed them.
+    pub members: Vec<MemberRowViewModel>,
+    pub blockages: Vec<BlockageRowViewModel>,
+    /// Present when the service's mesh status is newer than this client.
+    pub version_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRowViewModel {
+    /// "0102…  hub · alive · 10.42.3.4".
+    pub text: String,
+    /// Expired members are drawn dimmed.
+    pub dimmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockageRowViewModel {
+    pub cause: String,
+    pub remedy: String,
+    pub severity: Severity,
 }
 
 /// The panel's transient status line (command errors, "starting
@@ -88,7 +129,86 @@ pub fn panel_view_model(snapshot: &Snapshot, now_unix: u64) -> PanelViewModel {
         link_scope_line: link_scope_line(&snapshot.transport),
         dhcp_line: dhcp_line(&snapshot.transport),
         link_scope_desired: snapshot.transport.link_scope_desired,
+        mesh: mesh_view_model(&snapshot.mesh),
     }
+}
+
+fn role_name(r: NodeRole) -> &'static str {
+    match r {
+        NodeRole::Hub => "Hub",
+        NodeRole::Peer => "Peer",
+    }
+}
+
+/// [`MeshView`] → [`MeshViewModel`]. A service without a mesh status still
+/// gets the role toggle (the role is in the snapshot regardless).
+pub fn mesh_view_model(mesh: &MeshView) -> MeshViewModel {
+    let target = match mesh.role {
+        NodeRole::Hub => NodeRole::Peer,
+        NodeRole::Peer => NodeRole::Hub,
+    };
+    let mut vm = MeshViewModel {
+        role_line: format!("This machine: {}", role_name(mesh.role)),
+        role_toggle_label: format!("Switch to {}", role_name(target)),
+        role_toggle_target: target,
+        rate_line: String::new(),
+        bootstrap_line: String::new(),
+        members: Vec::new(),
+        blockages: Vec::new(),
+        version_note: None,
+    };
+    let Some(st) = &mesh.status else { return vm };
+    vm.rate_line = format!("{} Hz · epoch {}", st.rate.hz, st.rate.epoch);
+    let beacon = match &st.bootstrap.beacon {
+        BeaconStatus::NotRunning => "not running".to_string(),
+        BeaconStatus::Up { iface } => format!("up on {iface}"),
+        BeaconStatus::Down { iface, .. } => format!("down on {iface}"),
+        BeaconStatus::Unknown => "?".to_string(),
+    };
+    let n0 = match st.bootstrap.n0 {
+        N0Status::Off => "off",
+        N0Status::On => "on",
+        N0Status::Unknown => "?",
+    };
+    vm.bootstrap_line = format!("Beacon: {beacon} · n0: {n0}");
+    vm.members = st
+        .members
+        .iter()
+        .filter(|m| !m.is_self)
+        .map(|m| {
+            let live = match m.liveness {
+                Liveness::Alive => "alive".to_string(),
+                Liveness::Expiring => format!("expiring ({}s+)", m.last_seen_age_secs),
+                Liveness::Expired => format!("expired ({}s+)", m.last_seen_age_secs),
+                Liveness::Unknown => "?".to_string(),
+            };
+            let short: String = m.node_id.chars().take(8).collect();
+            MemberRowViewModel {
+                text: format!(
+                    "{short}  {} · {live} · {}",
+                    role_name(m.role).to_lowercase(),
+                    m.ipv4.as_deref().unwrap_or("no ipv4")
+                ),
+                dimmed: m.liveness == Liveness::Expired,
+            }
+        })
+        .collect();
+    vm.blockages = st
+        .blockages
+        .iter()
+        .map(|b| BlockageRowViewModel {
+            cause: b.cause_text(),
+            remedy: b.remedy_text(),
+            severity: b.severity(),
+        })
+        .collect();
+    if !st.is_supported() {
+        vm.version_note = Some(format!(
+            "Service mesh status is v{} (newer than this app); showing what is understood.",
+            st.version
+        ));
+    }
+    vm
 }
 
 /// [`StatusLine`] → [`StatusLineViewModel`], or `None` when there's nothing
@@ -277,6 +397,7 @@ mod tests {
             helper,
             bridge,
             transport: Default::default(),
+            mesh: Default::default(),
         }
     }
 
@@ -286,7 +407,69 @@ mod tests {
             helper: HelperState::NotRegistered,
             bridge: BridgeState { desired_up: false, actual: None, epoch: 0 },
             transport,
+            mesh: Default::default(),
         }
+    }
+
+    #[test]
+    fn mesh_vm_toggle_targets_the_opposite_role_and_remote_rows_are_read_only() {
+        use ipauro_proto::state::*;
+        let mut mesh = MeshView { role: NodeRole::Hub, ..Default::default() };
+        let vm = mesh_view_model(&mesh);
+        assert_eq!(
+            (vm.role_line.as_str(), vm.role_toggle_label.as_str(), vm.role_toggle_target),
+            ("This machine: Hub", "Switch to Peer", NodeRole::Peer)
+        );
+        assert!(vm.members.is_empty() && vm.blockages.is_empty() && vm.rate_line.is_empty());
+
+        mesh.role = NodeRole::Peer;
+        mesh.status = Some(MeshStatus {
+            version: MESH_STATUS_VERSION + 1,
+            members: vec![
+                MeshMember {
+                    node_id: "aaaaaaaaaaaaaaaa".into(),
+                    is_self: true,
+                    role: NodeRole::Peer,
+                    ula: None,
+                    ipv4: Some("10.42.0.1".into()),
+                    addr_salt: 0,
+                    last_seen_age_secs: 0,
+                    liveness: Liveness::Alive,
+                    reachability: Reachability::Unknown,
+                },
+                MeshMember {
+                    node_id: "bbbbbbbbbbbbbbbb".into(),
+                    is_self: false,
+                    role: NodeRole::Hub,
+                    ula: None,
+                    ipv4: Some("10.42.0.2".into()),
+                    addr_salt: 0,
+                    last_seen_age_secs: 60,
+                    liveness: Liveness::Expired,
+                    reachability: Reachability::Unknown,
+                },
+            ],
+            rate: MeshRateView { hz: 96_000, epoch: 2, author: String::new() },
+            bootstrap: BootstrapStatus {
+                beacon: BeaconStatus::Up { iface: "bridge90".into() },
+                beacons: vec![BeaconStatus::Up { iface: "bridge90".into() }],
+                n0: N0Status::Off,
+            },
+            blockages: vec![Blockage {
+                cause: BlockCause::PeerExpired { node_id: "bbbbbbbbbbbbbbbb".into(), age_secs: 60 },
+                remedy: Remedy::CheckPeer { node_id: "bbbbbbbbbbbbbbbb".into() },
+            }],
+            ..Default::default()
+        });
+        let vm = mesh_view_model(&mesh);
+        assert_eq!(vm.role_toggle_target, NodeRole::Hub);
+        assert_eq!(vm.rate_line, "96000 Hz · epoch 2");
+        assert_eq!(vm.bootstrap_line, "Beacon: up on bridge90 · n0: off");
+        assert_eq!(vm.members.len(), 1, "self is not a remote row");
+        assert_eq!(vm.members[0].text, "bbbbbbbb  hub · expired (60s+) · 10.42.0.2");
+        assert!(vm.members[0].dimmed);
+        assert_eq!(vm.blockages[0].severity, Severity::Degraded);
+        assert!(vm.version_note.is_some());
     }
 
     #[test]

@@ -59,6 +59,15 @@ pub struct MockHelper {
     bridge: Mutex<Option<BridgeInfo>>,
     scoped_ports: Mutex<Vec<(u16, Vec<String>)>>,
     dhcp_serving: Mutex<bool>,
+    /// Mesh aliases per interface (R003-T3, R003-B10): the bridge's under
+    /// `BRIDGE_NAME`, dropped with the bridge as on real macOS where
+    /// destroying/tearing the bridge takes its addresses; an uplink's under
+    /// its own name, dropped by [`MockHelper::unplug_uplink`].
+    aliases: Mutex<std::collections::BTreeMap<String, Vec<std::net::IpAddr>>>,
+    /// Uplink interfaces currently "plugged" — what the real helper's
+    /// `uplink_candidates` would list absent bridge membership (and the
+    /// default-route NIC, which the mock simply never plugs).
+    uplinks: Mutex<std::collections::BTreeSet<String>>,
     /// Every request received, in order — lets tests assert verb ordering
     /// (the M-incident test's whole point). Plain `std::sync::Mutex`: pushed
     /// to synchronously at the top of `request`, never held across an
@@ -81,6 +90,8 @@ impl MockHelper {
             bridge: Mutex::new(None),
             scoped_ports: Mutex::new(Vec::new()),
             dhcp_serving: Mutex::new(false),
+            aliases: Mutex::new(Default::default()),
+            uplinks: Mutex::new(Default::default()),
             requests: StdMutex::new(Vec::new()),
             version: crate::build_version(),
             rejected: StdMutex::new(Vec::new()),
@@ -116,6 +127,57 @@ impl MockHelper {
     /// Records no request — nothing asked for it.
     pub async fn destroy_out_of_band(&self) {
         *self.bridge.lock().await = None;
+        self.aliases.lock().await.remove(BRIDGE_NAME);
+    }
+
+    /// An uplink interface appears (cable plugged). Records no request.
+    pub async fn plug_uplink(&self, name: &str) {
+        self.uplinks.lock().await.insert(name.to_string());
+    }
+
+    /// The uplink disappears; its addresses go with it, as on real macOS.
+    pub async fn unplug_uplink(&self, name: &str) {
+        self.uplinks.lock().await.remove(name);
+        self.aliases.lock().await.remove(name);
+    }
+
+    /// Aliases currently on `iface` (test inspection). Records no request.
+    pub async fn aliases_on(&self, iface: &str) -> Vec<std::net::IpAddr> {
+        self.aliases.lock().await.get(iface).cloned().unwrap_or_default()
+    }
+}
+
+impl MockHelper {
+    /// Why the real helper would refuse `iface` as an alias target, if it
+    /// would: the bridge must exist; an uplink must be plugged and must not be
+    /// a current bridge member.
+    async fn alias_target_error(&self, iface: &str) -> Option<String> {
+        let bridge = self.bridge.lock().await;
+        if iface == BRIDGE_NAME {
+            return bridge.is_none().then(|| "no such bridge".to_string());
+        }
+        if !self.uplinks.lock().await.contains(iface) {
+            return Some(format!("{iface} is not a managed uplink"));
+        }
+        if bridge.as_ref().is_some_and(|b| b.members.iter().any(|m| m == iface)) {
+            return Some(format!("{iface} is a bridge member"));
+        }
+        None
+    }
+
+    /// The report's per-uplink aliases: plugged, non-member, non-empty.
+    async fn uplink_aliases(&self) -> Vec<(String, Vec<std::net::IpAddr>)> {
+        let members = self.bridge.lock().await.as_ref().map(|b| b.members.clone()).unwrap_or_default();
+        let plugged = self.uplinks.lock().await.clone();
+        self.aliases
+            .lock()
+            .await
+            .iter()
+            .filter(|(name, a)| {
+                name.as_str() != BRIDGE_NAME && plugged.contains(*name) && !members.contains(name) && !a.is_empty()
+            })
+            .map(|(n, a)| (n.clone(), a.clone()))
+            .collect()
     }
 }
 
@@ -158,6 +220,7 @@ impl HelperChannel for MockHelper {
             HelperRequest::DestroyBridge => {
                 let mut bridge = self.bridge.lock().await;
                 *bridge = None;
+                self.aliases.lock().await.remove(BRIDGE_NAME);
                 Ok(HelperResponse::Ok)
             }
             HelperRequest::SetBridgeMembers { members } => {
@@ -174,6 +237,7 @@ impl HelperChannel for MockHelper {
                     // A002 §4: unplugging (removing) ONE member tears down the
                     // ENTIRE bridge on real macOS, not just that member.
                     *bridge = None;
+                    self.aliases.lock().await.remove(BRIDGE_NAME);
                     Ok(HelperResponse::Bridge { info: None })
                 } else {
                     current.members = members;
@@ -191,6 +255,28 @@ impl HelperChannel for MockHelper {
                         message: "SetBridgeAddress: no such bridge".to_string(),
                     }),
                 }
+            }
+            HelperRequest::AddAlias { iface, addr, prefix: _ } => {
+                if let Some(err) = self.alias_target_error(&iface).await {
+                    return Ok(HelperResponse::Err { message: format!("AddAlias: {err}") });
+                }
+                let mut aliases = self.aliases.lock().await;
+                let on = aliases.entry(iface).or_default();
+                if !on.contains(&addr) {
+                    on.push(addr);
+                }
+                Ok(HelperResponse::Ok)
+            }
+            HelperRequest::RemoveAlias { iface, addr } => {
+                // The real helper validates the target before ANY exec,
+                // including a remove; absent aliases are Ok.
+                if iface != BRIDGE_NAME && !self.uplinks.lock().await.contains(&iface) {
+                    return Ok(HelperResponse::Err { message: format!("RemoveAlias: {iface} is not a managed uplink") });
+                }
+                if let Some(on) = self.aliases.lock().await.get_mut(&iface) {
+                    on.retain(|a| *a != addr);
+                }
+                Ok(HelperResponse::Ok)
             }
             HelperRequest::ScopeUdp { port, allowed_ifaces } => {
                 let mut scoped = self.scoped_ports.lock().await;
@@ -214,7 +300,14 @@ impl HelperChannel for MockHelper {
                 let bridge = self.bridge.lock().await.clone();
                 let scoped_ports = self.scoped_ports.lock().await.clone();
                 let dhcp_serving = *self.dhcp_serving.lock().await;
-                Ok(HelperResponse::Report { report: DataPlaneReport { bridge, scoped_ports, dhcp_serving } })
+                Ok(HelperResponse::Report { report: DataPlaneReport {
+                    bridge,
+                    scoped_ports,
+                    dhcp_serving,
+                    bridge_aliases: self.aliases_on(BRIDGE_NAME).await,
+                    uplink_aliases: self.uplink_aliases().await,
+                    dhcp_leases: Vec::new(),
+                } })
             }
         }
     }

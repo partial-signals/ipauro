@@ -11,6 +11,10 @@ use anyhow::{Context, Result, bail};
 /// module's [`list_interfaces`] use.
 pub const IFCONFIG: &str = "/sbin/ifconfig";
 
+/// `/sbin/route` — read-only, to find the default-route interface (the
+/// primary NIC an uplink alias must never land on, R003-B10).
+pub const ROUTE: &str = "/sbin/route";
+
 /// `/sbin/pfctl` — used by `pf.rs` only, kept here for a single source of
 /// truth on binary paths.
 pub const PFCTL: &str = "/sbin/pfctl";

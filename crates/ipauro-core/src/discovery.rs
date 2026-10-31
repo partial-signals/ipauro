@@ -125,6 +125,19 @@ impl UsbLink {
         matches!(self.role, LinkRole::Host)
     }
 
+    /// Whether a node may reach a hub's segment through this link (R003-B10):
+    /// every identified link except [`LinkRole::Internal`], the rejected
+    /// macOS-internal decoys. Both ends of a cable qualify — a Host-role link
+    /// is a cable this Mac enumerated (a Peer still does not bridge it), a
+    /// Device-role link is one it is the device end of. Distinct from
+    /// [`Self::bridge_eligible`], which only a Hub's bridge membership uses.
+    pub fn uplink_eligible(&self) -> bool {
+        match self.role {
+            LinkRole::Host | LinkRole::Device => true,
+            LinkRole::Internal => false,
+        }
+    }
+
     /// The strongest signal supporting this link.
     pub fn strongest(&self) -> Evidence {
         self.evidence.first().copied().unwrap_or(Evidence::DeviceIokit)
@@ -169,6 +182,16 @@ impl LinkInventory {
     /// list.
     pub fn bridge_members(&self) -> Vec<String> {
         self.links.iter().filter(|l| l.bridge_eligible()).map(|l| l.name.clone()).collect()
+    }
+
+    /// Interfaces a Peer self-addresses and announces on (R003-B10): every
+    /// [`UsbLink::uplink_eligible`] link. Sorted by name (inventory order).
+    /// Built from the same IOKit/link-state evidence as the bridge feed, never
+    /// from interface-name shape; USB-NCM is the only attachment class
+    /// identified today (Thunderbolt/plain Ethernet are not — a gap, see the
+    /// ticket's handoff).
+    pub fn uplinks(&self) -> Vec<String> {
+        self.links.iter().filter(|l| l.uplink_eligible()).map(|l| l.name.clone()).collect()
     }
 
     /// This Mac's device-end link(s), if it is the device end of a cable.
@@ -948,6 +971,24 @@ en5        1500  169.254       169.254.109.94       45210     -   38102994    31
             "AppleUSBDeviceNCMData must never feed bridging — it is also the \
              class of macOS's internal inter-processor interfaces (A002 §5)"
         );
+    }
+
+    #[test]
+    fn uplinks_are_host_and_device_links_never_internals() {
+        // en9: host end (cable this Mac enumerated); en5: device end (active +
+        // configured); en1: macOS-internal decoy (inactive). Only the decoy is
+        // excluded, and the answer comes from role, not from the `enN` shape
+        // all three share.
+        let inv = classify(
+            &strs(&["en9"]),
+            &strs(&["en1", "en5"]),
+            &[obs("en9", true, true, 5), obs("en5", true, true, 5), obs("en1", false, false, 0)],
+            &[],
+        );
+        assert_eq!(inv.uplinks(), strs(&["en5", "en9"]));
+        assert_eq!(link(&inv, "en1").role, LinkRole::Internal);
+        assert!(!link(&inv, "en1").uplink_eligible());
+        assert_eq!(inv.bridge_members(), strs(&["en9"]), "bridge feed is unchanged");
     }
 
     #[test]

@@ -39,6 +39,37 @@ pub async fn handle(
             store.mutate(|s| s.transport.link_scope_desired = enabled).await;
             drive_reply(reconcile::drive_once(store, helper, usb_source).await, reconcile_kick)
         }
+        Command::SetRole { role } => {
+            // Persist first, then desired state, then reconcile — same
+            // ordering as the other desired-state commands. A role the disk
+            // refused is an error: it would silently revert on restart.
+            if let Err(e) = store.persist_role(role) {
+                return err(ErrorCode::Internal, format!("could not persist role: {e}"));
+            }
+            store.mutate_if_changed(|s| s.mesh.role = role).await;
+            drive_reply(reconcile::drive_once(store, helper, usb_source).await, reconcile_kick)
+        }
+        Command::ProposeMeshRate { hz } => {
+            let Some(mesh) = store.mesh_control() else {
+                return err(ErrorCode::MeshUnavailable, "no mesh is running on this node");
+            };
+            match mesh.propose_rate(hz) {
+                Ok(rate) => {
+                    // Reflect the new epoch at once; the sync loop would
+                    // catch up within a second, but the reply should not lie.
+                    let view = crate::mesh_status::rate_view(&rate);
+                    store
+                        .mutate_if_changed(|s| {
+                            if let Some(st) = s.mesh.status.as_mut() {
+                                st.rate = view;
+                            }
+                        })
+                        .await;
+                    ReplyOutcome::Ok { snapshot: store.snapshot().await }
+                }
+                Err(e) => err(ErrorCode::InvalidCommand, e.to_string()),
+            }
+        }
         Command::RegisterHelper => match registrar.register().await {
             Ok(()) => {
                 let status = registrar.status();

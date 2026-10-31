@@ -7,6 +7,15 @@
 //! This module only interprets an already-decoded OSC message
 //! (address + arguments). Packet decoding belongs with whichever IPAuRo
 //! adapter owns the socket.
+//!
+//! @yah:ticket(R010-F9, "Metadata side channel for the system-sound device: advertise metadata_endpoint + added latency as device properties, own the ADM-OSC ingest socket, forward re-timed object state")
+//! @yah:at(2026-10-24T07:02:45Z)
+//! @yah:parent(R010)
+//! @yah:next("Scope: noisetable W296 (.yah/docs/working/W296-ipauro-as-the-network-audio-path.md in the noisetable camp) section 5, IPAuRo items 1-3. Operator F1401/F1623: noisetable opens IPAuRo's device as an ordinary audio bus and sends ADM-OSC to an endpoint the DEVICE declares.")
+//! @yah:next("1) The R010-F6 device declares metadata_endpoint (host:port) and its added network latency as custom device properties, plus a declared identity (manufacturer/UID) noisetable can match without parsing display names.")
+//! @yah:next("2) The agent owns a UDP socket at that endpoint, decodes OSC, and feeds ipauro_spatial::adm_osc::parse. Pairing v1 is by convention: ADM-OSC object n = device input channel n.")
+//! @yah:next("3) Forward object state with the routed stream (A004 channel_map role Object) and re-emit ADM-OSC downstream, re-timed by IPAuRo's network leg (W296 section 3.4).")
+//! @yah:depends_on(R010-F6)
 
 use serde::Serialize;
 

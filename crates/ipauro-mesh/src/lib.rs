@@ -10,7 +10,7 @@
 //! algorithms above the wire. It:
 //!
 //! - treats every transport to a peer (Link multicast interface, iroh overlay
-//!   connection, Thunderbolt/USB-C bridge) as a [`Gateway`](transport::Gateway),
+//!   connection, Thunderbolt/USB-C bridge) as a [`transport::Gateway`],
 //!   generalizing Link's per-gateway best-path model (§8.1);
 //! - keeps a strict **control/media split** (§8.2): the reliable overlay carries
 //!   control only; live audio stays on unreliable/timely datagrams;
@@ -20,7 +20,21 @@
 //!   election, and flow optimization that converges on shared-objective *inputs*,
 //!   never on consensus of outputs;
 //! - selects paths **feasibility-first** (§8.4): constraints filter, preferences
-//!   rank.
+//!   rank;
+//! - gossips **per-node protocol capability** (R010-F1, A004): which protocol
+//!   families a node speaks, with what formats/packetization/clock, and which
+//!   pairs it can translate between — the cross-family discovery that lets a
+//!   Protocol-NAT gateway be *elected* instead of hand-configured. The registry
+//!   of protocol rows is [`protocol`]; the advertisement is
+//!   [`capability::ProtocolCaps`];
+//! - **elects a Protocol-NAT gateway per translation leg** (R010-F2, [`gateway`]):
+//!   which pairs of islands need bridging is derived from the census, who
+//!   bridges each is the usual lowest-id tie-break over the nodes that honour
+//!   that translation, and a pair nobody can bridge is reported, not dropped;
+//! - **plans stream flows** (R010-F3, [`stream`]): 1:1 / fan-in / fan-out, each
+//!   source→sink leg independently passthrough or transcode (at the source, the
+//!   sink, or the elected gateway), routed over the graph, channel-discrete —
+//!   **never mixed**.
 //!
 //! ## Provenance
 //!
@@ -42,12 +56,18 @@
 #[cfg(test)]
 mod tests;
 
+pub mod addressing;
 pub mod capability;
+pub mod control;
 pub mod election;
+pub mod gateway;
 pub mod gossip;
 pub mod ids;
 pub mod policy;
+pub mod protocol;
+pub mod rate;
 pub mod routing;
+pub mod stream;
 pub mod topology;
 pub mod transport;
 
@@ -104,6 +124,12 @@ impl MeshNode {
         self.policy.epoch
     }
 
+    /// The adopted mesh sample rate (R003-F8) and its epoch. A node never
+    /// advertises any other rate.
+    pub fn mesh_rate(&self) -> rate::MeshRate {
+        self.policy.rate
+    }
+
     /// Register a live transport to a peer (a Link multicast interface, an iroh
     /// connection whose direct path is up, a Thunderbolt bridge, …).
     pub fn add_gateway(&mut self, gw: Box<dyn Gateway>) {
@@ -140,10 +166,28 @@ impl MeshNode {
         self.topology.apply(record)
     }
 
+    /// Expire a peer that has gone silent: remove it from the topology view
+    /// (R003-F2). Liveness timing is the dissemination layer's job (it knows
+    /// the heartbeat clock); the mesh only owns the resulting view change.
+    pub fn forget_peer(&mut self, peer: NodeId) -> bool {
+        self.topology.forget(peer)
+    }
+
     /// Plan a route for one demand under the current policy. Feasibility-first:
     /// see [`routing::plan`].
     pub fn plan_route(&self, req: &routing::RouteRequest) -> Option<routing::Route> {
         routing::plan(&self.topology, &self.policy, req)
+    }
+
+    /// Plan a control frame toward `dest` (R003-F6): local, terminate for a
+    /// foreign leaf this node advertises, forward to a relay, or unroutable.
+    pub fn plan_control(&self, dest: NodeId) -> control::ControlPlan {
+        control::plan_control(&self.topology, self.me, dest)
+    }
+
+    /// How this node reaches `dest` for control (R003-F6).
+    pub fn control_reachability(&self, dest: NodeId) -> control::Reachability {
+        control::reachability(&self.topology, self.me, dest)
     }
 
     /// Who owns a single-owner role (clock master for a domain, multicast-group
@@ -151,6 +195,39 @@ impl MeshNode {
     /// No consensus round: every node computes the same winner from the same view.
     pub fn leader_for(&self, role: election::Role) -> Option<NodeId> {
         election::elect(self.me, &self.topology, role)
+    }
+
+    /// Peers that speak `proto`, from the gossiped view (R010-F1). A protocol
+    /// whose speakers can reach no translator is a single-protocol island.
+    pub fn peers_speaking(&self, proto: protocol::ProtocolId) -> Vec<NodeId> {
+        self.topology.speakers_of(proto)
+    }
+
+    /// Peers that can bridge `from` → `to` — the candidate set a Protocol-NAT
+    /// election (R010-F2) picks from by the usual lowest-id tie-break.
+    pub fn translators(&self, from: protocol::ProtocolId, to: protocol::ProtocolId) -> Vec<NodeId> {
+        self.topology.translators(from, to)
+    }
+
+    /// The mesh's Protocol-NAT assignment (R010-F2): every translation leg the
+    /// census demands, with the elected gateway or `None` when no node can
+    /// serve it. Same answer on every node from the same view.
+    pub fn gateway_plan(&self) -> Vec<gateway::Leg> {
+        gateway::plan(&self.topology)
+    }
+
+    /// Is this node the elected gateway for `from → to`? What an adapter host
+    /// polls to decide whether to stand up that transcode leg.
+    pub fn is_gateway_for(&self, from: protocol::ProtocolId, to: protocol::ProtocolId) -> bool {
+        gateway::elect(&self.topology, from, to) == Some(self.me)
+    }
+
+    /// Plan how a set of streams reaches a set of sinks (R010-F3): one egress
+    /// leg per sink, one passthrough-or-transcode input per source, a
+    /// channel-discrete slot map, and every blockage named. Deterministic across
+    /// nodes, so source, gateway and sink each act on their part of one plan.
+    pub fn plan_flow(&self, demand: &stream::Demand) -> stream::Flow {
+        stream::plan(&self.topology, &self.policy, demand)
     }
 }
 

@@ -1,0 +1,24 @@
+[package]
+name = "ipauro-iroh"
+description = "IPAuRo iroh adapter: ed25519 machine identity, derived mesh NodeId, endpoint bootstrap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ipauro-mesh = { path = "../ipauro-mesh" }
+ipauro-proto = { workspace = true }
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+iroh = "1.4"
+iroh-gossip = "0.101"
+tokio = { workspace = true }
+futures-lite = "2"
+blake3 = "1"
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
